@@ -846,6 +846,189 @@ def get_stage_skips(cfg, steps, always_skip=None, special_one_over_f=False):
 # ----------------------------------------
 # main
 # ----------------------------------------
+def run_pipeline_stage(stage, input_data, run_cfg, stage_args, skips=None, do_plot=None, centroids=None):
+    """
+    Runs a specific stage of the exoTEDRF pipeline.
+    """
+    if do_plot is None:
+        do_plot = run_cfg['do_plots']
+
+    # Stage 1
+    if stage == 1:
+        stage1_skip = get_stage_skips(run_cfg, stage1_steps, always_skip=skips, special_one_over_f=True)
+        return run_stage1(
+            input_data,
+            mode=run_cfg['observing_mode'],
+            soss_background_model=run_cfg['soss_background_file'],
+            baseline_ints=run_cfg['baseline_ints'],
+            oof_method=run_cfg['oof_method'],
+            superbias_method=run_cfg['superbias_method'],
+            soss_timeseries=run_cfg['soss_timeseries'],
+            soss_timeseries_o2=run_cfg['soss_timeseries_o2'],
+            save_results=True,
+            pixel_masks=run_cfg['outlier_maps'],
+            force_redo=True,
+            flag_up_ramp=run_cfg['flag_up_ramp'],
+            rejection_threshold=run_cfg['jump_threshold'],
+            flag_in_time=run_cfg['flag_in_time'],
+            time_rejection_threshold=run_cfg['time_jump_threshold'],
+            output_tag=run_cfg['output_tag'],
+            skip_steps=stage1_skip,
+            do_plot=do_plot,
+            soss_inner_mask_width=run_cfg['soss_inner_mask_width'],
+            soss_outer_mask_width=run_cfg['soss_outer_mask_width'],
+            nirspec_mask_width=run_cfg['nirspec_mask_width'],
+            centroids=run_cfg['centroids'],
+            hot_pixel_map=run_cfg['hot_pixel_map'],
+            miri_drop_groups=run_cfg['miri_drop_groups'],
+            **run_cfg.get('stage1_kwargs', {}),
+            **stage_args
+        )
+
+    # Stage 2
+    elif stage == 2:
+        stage2_skip = get_stage_skips(run_cfg, stage2_steps, always_skip=skips)
+        results, centroids_out = run_stage2(
+            input_data,
+            mode=run_cfg['observing_mode'],
+            soss_background_model=run_cfg['soss_background_file'],
+            baseline_ints=run_cfg['baseline_ints'],
+            save_results=True,
+            force_redo=True,
+            space_thresh=run_cfg['space_outlier_threshold'],
+            time_thresh=run_cfg['time_outlier_threshold'],
+            remove_components=run_cfg['remove_components'],
+            pca_components=run_cfg['pca_components'],
+            soss_timeseries=run_cfg['soss_timeseries'],
+            soss_timeseries_o2=run_cfg['soss_timeseries_o2'],
+            oof_method=run_cfg['oof_method'],
+            output_tag=run_cfg['output_tag'],
+            smoothing_scale=run_cfg['smoothing_scale'],
+            skip_steps=stage2_skip,
+            generate_lc=run_cfg['generate_lc'],
+            soss_inner_mask_width=run_cfg['soss_inner_mask_width'],
+            soss_outer_mask_width=run_cfg['soss_outer_mask_width'],
+            nirspec_mask_width=run_cfg['nirspec_mask_width'],
+            pixel_masks=run_cfg['outlier_maps'],
+            generate_order0_mask=run_cfg['generate_order0_mask'],
+            f277w=run_cfg['f277w'],
+            do_plot=do_plot,
+            centroids=run_cfg['centroids'],
+            miri_trace_width=run_cfg['miri_trace_width'],
+            miri_background_width=run_cfg['miri_background_width'],
+            miri_background_method=run_cfg['miri_background_method'],
+            **run_cfg.get('stage2_kwargs', {}),
+            **stage_args
+        )
+        if isinstance(centroids_out, np.ndarray):
+            centroids_out = pd.DataFrame(centroids_out.T, columns=["xpos", "ypos"])
+        return results, centroids_out
+
+    # Stage 3
+    elif stage == 3:
+        stage3_skip = get_stage_skips(run_cfg, stage3_steps, always_skip=skips)
+        this_centroid = run_cfg['centroids'] if run_cfg['centroids'] is not None else centroids
+        return run_stage3(
+            input_data,
+            save_results=True,
+            force_redo=True,
+            extract_method=run_cfg['extract_method'],
+            soss_specprofile=run_cfg['soss_specprofile'],
+            centroids=this_centroid,
+            extract_width=run_cfg['extract_width'],
+            st_teff=run_cfg['st_teff'],
+            st_logg=run_cfg['st_logg'],
+            st_met=run_cfg['st_met'],
+            planet_letter=run_cfg['planet_letter'],
+            output_tag=run_cfg['output_tag'],
+            do_plot=do_plot,
+            skip_steps=stage3_skip,
+            **run_cfg.get('stage3_kwargs', {}),
+            **stage_args
+        )
+PIPELINE_LOGIC = {
+    # Stage 1 parameters
+    'soss_inner_mask_width': {
+        'rerun_from_stage': 1,
+        'stage1_skips': ['DQInitStep', 'EmiCorrStep', 'SaturationStep', 'ResetStep', 'SuperBiasStep', 'RefPixStep', 'DarkCurrentStep'],
+        'stage1_input_steps': ["darkcurrentstep", "refpixstep", "superbiasstep", 'resetstep', 'saturationstep', 'emicorrstep', 'dqinitstep'],
+    },
+    'soss_outer_mask_width': {
+        'rerun_from_stage': 1,
+        'stage1_skips': ['DQInitStep', 'EmiCorrStep', 'SaturationStep', 'ResetStep', 'SuperBiasStep', 'RefPixStep', 'DarkCurrentStep'],
+        'stage1_input_steps': ["darkcurrentstep", "refpixstep", "superbiasstep", 'resetstep', 'saturationstep', 'emicorrstep', 'dqinitstep'],
+    },
+    'nirspec_mask_width': {
+        'rerun_from_stage': 1,
+        'stage1_skips': ['DQInitStep', 'EmiCorrStep', 'SaturationStep', 'ResetStep', 'SuperBiasStep', 'RefPixStep', 'DarkCurrentStep'],
+        'stage1_input_steps': ["darkcurrentstep", "refpixstep", "superbiasstep", 'resetstep', 'saturationstep', 'emicorrstep', 'dqinitstep'],
+    },
+    'time_jump_threshold': {
+        'rerun_from_stage': 1,
+        'stage1_skips': ['DQInitStep', 'EmiCorrStep', 'SaturationStep', 'ResetStep', 'SuperBiasStep', 'RefPixStep', 'DarkCurrentStep', 'OneOverFStep', 'LinearityStep'],
+        'stage1_input_steps': ['linearitystep', 'oneoverfstep', "darkcurrentstep", "refpixstep", "superbiasstep", 'resetstep', 'saturationstep', 'emicorrstep', 'dqinitstep'],
+    },
+    'time_window': {
+        'rerun_from_stage': 1,
+        'stage1_skips': ['DQInitStep', 'EmiCorrStep', 'SaturationStep', 'ResetStep', 'SuperBiasStep', 'RefPixStep', 'DarkCurrentStep', 'OneOverFStep', 'LinearityStep'],
+        'stage1_input_steps': ['linearitystep', 'oneoverfstep', "darkcurrentstep", "refpixstep", "superbiasstep", 'resetstep', 'saturationstep', 'emicorrstep', 'dqinitstep'],
+    },
+    # Stage 2 parameters
+    'miri_trace_width': {
+        'rerun_from_stage': 2,
+        'stage2_skips': ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep', 'WaveCorrStep', 'FlatFieldStep'],
+        'stage2_input_steps': {'primary': ['flatfieldstep', 'wavecorrstep', 'sourcetypestep', 'extract2dstep', 'assignwcsstep'], 'secondary': ["gainscalestep", 'rampfitstep', 'jumpstep']},
+    },
+    'miri_background_width': {
+        'rerun_from_stage': 2,
+        'stage2_skips': ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep', 'WaveCorrStep', 'FlatFieldStep'],
+        'stage2_input_steps': {'primary': ['flatfieldstep', 'wavecorrstep', 'sourcetypestep', 'extract2dstep', 'assignwcsstep'], 'secondary': ["gainscalestep", 'rampfitstep', 'jumpstep']},
+    },
+    'space_outlier_threshold': {
+        'rerun_from_stage': 2,
+        'stage2_skips': ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep', 'WaveCorrStep', 'FlatFieldStep', 'BackgroundStep', 'OneOverFStep'],
+        'stage2_input_steps': {'primary': ['oneoverfstep', 'backgroundstep', 'flatfieldstep', 'wavecorrstep', 'sourcetypestep', 'extract2dstep', 'assignwcsstep'], 'secondary': ["gainscalestep", 'rampfitstep', 'jumpstep']},
+    },
+    'time_outlier_threshold': {
+        'rerun_from_stage': 2,
+        'stage2_skips': ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep', 'WaveCorrStep', 'FlatFieldStep', 'BackgroundStep', 'OneOverFStep'],
+        'stage2_input_steps': {'primary': ['oneoverfstep', 'backgroundstep', 'flatfieldstep', 'wavecorrstep', 'sourcetypestep', 'extract2dstep', 'assignwcsstep'], 'secondary': ["gainscalestep", 'rampfitstep', 'jumpstep']},
+    },
+    'box_size': {
+        'rerun_from_stage': 2,
+        'stage2_skips': ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep', 'WaveCorrStep', 'FlatFieldStep', 'BackgroundStep', 'OneOverFStep'],
+        'stage2_input_steps': {'primary': ['oneoverfstep', 'backgroundstep', 'flatfieldstep', 'wavecorrstep', 'sourcetypestep', 'extract2dstep', 'assignwcsstep'], 'secondary': ["gainscalestep", 'rampfitstep', 'jumpstep']},
+    },
+    'window_size': {
+        'rerun_from_stage': 2,
+        'stage2_skips': ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep', 'WaveCorrStep', 'FlatFieldStep', 'BackgroundStep', 'OneOverFStep'],
+        'stage2_input_steps': {'primary': ['oneoverfstep', 'backgroundstep', 'flatfieldstep', 'wavecorrstep', 'sourcetypestep', 'extract2dstep', 'assignwcsstep'], 'secondary': ["gainscalestep", 'rampfitstep', 'jumpstep']},
+    },
+    # Stage 3 parameters
+    'extract_width': {
+        'rerun_from_stage': 3,
+        'stage3_input_steps': {
+            'primary': ['tracingstep', 'pcareconstructstep', 'badpixstep', 'oneoverfstep', 'backgroundstep', 'flatfieldstep', 'wavecorrstep', 'sourcetypestep', 'extract2dstep', 'assignwcsstep'],
+            'secondary': ["gainscalestep", 'rampfitstep', 'jumpstep']
+        },
+    },
+}
+PIPELINE_LOGIC['jump_threshold'] = PIPELINE_LOGIC['time_jump_threshold']
+PIPELINE_LOGIC['time_rejection_threshold'] = PIPELINE_LOGIC['time_jump_threshold']
+PIPELINE_LOGIC['space_thresh'] = PIPELINE_LOGIC['space_outlier_threshold']
+PIPELINE_LOGIC['time_thresh'] = PIPELINE_LOGIC['time_outlier_threshold']
+
+stage1_steps = [
+    'DQInitStep', 'EmiCorrStep', 'SaturationStep', 'ResetStep', 'SuperBiasStep',
+    'RefPixStep', 'DarkCurrentStep', 'OneOverFStep_grp', 'LinearityStep',
+    'JumpStep', 'RampFitStep', 'GainScaleStep'
+]
+stage2_steps = [
+    'AssignWCSStep', 'Extract2DStep', 'SourceTypeStep', 'WaveCorrStep',
+    'FlatFieldStep', 'BackgroundStep', 'OneOverFStep_int', 'BadPixStep',
+    'PCAReconstructStep', 'TracingStep'
+]
+stage3_steps = []
 
 def main():
     # Set up argument parser for command-line usage
@@ -1007,665 +1190,40 @@ def main():
             # depending on which parameter is being optimized
             # ----------------------------------------------------------------
 
+            rerun_logic = PIPELINE_LOGIC.get(key)
 
-            if best_cost is None:
-                # ======================================================
-                # First trial for this parameter -> run full Stage 1 -> 3
-                # ======================================================
-
-                # -------------------------
-                # Stage 1: Detector-level processing
-                # -------------------------
-
-                # Steps to always skip in Stage 1 (none in this case)
-                always_skip1 = []
-
-                # Determine Stage-1 steps to skip based on config (cfg)
-                # and 'always_skip1'. The `special_one_over_f=True` flag
-                # triggers extra logic for OneOverFStep naming variations.
-                stage1_skip = get_stage_skips(
-                    cfg,
-                    stage1_steps,
-                    always_skip=always_skip1,
-                    special_one_over_f=True
-                )
-
-                # Run Stage 1 on raw input files
-                stage1_results = run_stage1(
-                    input_files,
-                    mode=run_cfg['observing_mode'],                # e.g. 'NIRSpec/PRISM'
-                    soss_background_model=run_cfg['soss_background_file'],
-                    baseline_ints=run_cfg['baseline_ints'],
-                    oof_method=run_cfg['oof_method'],              # one-over-f noise correction method
-                    superbias_method=run_cfg['superbias_method'],  # superbias subtraction method
-                    soss_timeseries=run_cfg['soss_timeseries'],
-                    soss_timeseries_o2=run_cfg['soss_timeseries_o2'],
-                    save_results=True,
-                    pixel_masks=run_cfg['outlier_maps'],           # optional pixel mask files
-                    force_redo=True,                               # force rerun even if files exist
-                    flag_up_ramp=run_cfg['flag_up_ramp'],          # flag groups during up-the-ramp fitting
-                    rejection_threshold=run_cfg['jump_threshold'], # jump detection threshold
-                    flag_in_time=run_cfg['flag_in_time'],          # time-based flagging
-                    time_rejection_threshold=run_cfg['time_jump_threshold'],
-                    output_tag=run_cfg['output_tag'],              # appended to filenames
-                    skip_steps=stage1_skip,                        # steps to skip this run
-                    do_plot=run_cfg['do_plots'],                   # plots
-                    soss_inner_mask_width=run_cfg['soss_inner_mask_width'],
-                    soss_outer_mask_width=run_cfg['soss_outer_mask_width'],
-                    nirspec_mask_width=run_cfg['nirspec_mask_width'],
-                    centroids=run_cfg['centroids'],                # optional centroids file
-                    hot_pixel_map=run_cfg['hot_pixel_map'],        # hot-pixel map for masking
-                    miri_drop_groups=run_cfg['miri_drop_groups'],  # MIRI group-dropping parameter
-                    **run_cfg.get('stage1_kwargs', {}),             # extra Stage-1 kwargs from config
-                    **s1_args                                       # overrides built earlier in loop
-                )
-
-                # -------------------------
-                # Stage 2: Spectroscopic extraction & calibration
-                # -------------------------
-
-                always_skip2 = []
-                # Determine Stage-2 steps to skip (no special handling here)
-                stage2_skip = get_stage_skips(
-                    cfg,
-                    stage2_steps,
-                    always_skip=always_skip2,
-                    special_one_over_f=False
-                )
-
-                # Run Stage 2 using Stage-1 outputs
-                stage2_results, centroids = run_stage2(
-                    stage1_results,
-                    mode=run_cfg['observing_mode'],
-                    soss_background_model=run_cfg['soss_background_file'],
-                    baseline_ints=run_cfg['baseline_ints'],
-                    save_results=True,
-                    force_redo=True,
-                    space_thresh=run_cfg['space_outlier_threshold'],   # spatial outlier threshold
-                    time_thresh=run_cfg['time_outlier_threshold'],     # temporal outlier threshold
-                    remove_components=run_cfg['remove_components'],    # PCA components to remove
-                    pca_components=run_cfg['pca_components'],          # number of PCA components
-                    soss_timeseries=run_cfg['soss_timeseries'],
-                    soss_timeseries_o2=run_cfg['soss_timeseries_o2'],
-                    oof_method=run_cfg['oof_method'],
-                    output_tag=run_cfg['output_tag'],
-                    smoothing_scale=run_cfg['smoothing_scale'],        # smoothing scale for extraction
-                    skip_steps=stage2_skip,
-                    generate_lc=run_cfg['generate_lc'],                 # whether to generate light curves
-                    soss_inner_mask_width=run_cfg['soss_inner_mask_width'],
-                    soss_outer_mask_width=run_cfg['soss_outer_mask_width'],
-                    nirspec_mask_width=run_cfg['nirspec_mask_width'],
-                    pixel_masks=run_cfg['outlier_maps'],
-                    generate_order0_mask=run_cfg['generate_order0_mask'],
-                    f277w=run_cfg['f277w'],                              # filter-specific processing
-                    do_plot=run_cfg['do_plots'],
-                    centroids=run_cfg['centroids'],
-                    miri_trace_width=run_cfg['miri_trace_width'],
-                    miri_background_width=run_cfg['miri_background_width'],
-                    miri_background_method=run_cfg['miri_background_method'],
-                    **run_cfg.get('stage2_kwargs', {}),
-                    **s2_args
-                )
-
-                # If Stage 2 returns centroids as numpy array, convert to DataFrame
-                if isinstance(centroids, np.ndarray):
-                    centroids = pd.DataFrame(centroids.T, columns=["xpos", "ypos"])
-
-                # -------------------------
-                # Stage 3: 1D spectrum extraction
-                # -------------------------
-
-                always_skip3 = []
-                # Determine Stage-3 steps to skip (none special)
-                stage3_skip = get_stage_skips(
-                    cfg,
-                    stage3_steps,
-                    always_skip=always_skip3,
-                    special_one_over_f=False
-                )
-
-                # Use user-provided centroids if present; otherwise take from Stage 2
-                this_centroid = cfg['centroids'] if cfg['centroids'] is not None else centroids
-
-                # Run Stage 3 to get final extracted spectrum
-                stage3_results = run_stage3(
-                    stage2_results,
-                    save_results=True,
-                    force_redo=True,
-                    extract_method=run_cfg['extract_method'],       # e.g., 'box', 'optimal'
-                    soss_specprofile=run_cfg['soss_specprofile'],   # spectral profile file for SOSS
-                    centroids=this_centroid,
-                    extract_width=run_cfg['extract_width'],         # aperture width in pixels
-                    st_teff=run_cfg['st_teff'],                     # stellar Teff
-                    st_logg=run_cfg['st_logg'],                     # stellar logg
-                    st_met=run_cfg['st_met'],                       # stellar metallicity
-                    planet_letter=run_cfg['planet_letter'],         # planet letter (b, c, etc.)
-                    output_tag=run_cfg['output_tag'],
-                    do_plot=run_cfg['do_plots'],
-                    skip_steps=stage3_skip,
-                    **run_cfg.get('stage3_kwargs', {}),
-                    **s3_args
-                )
-
-            
+            if best_cost is None or rerun_logic is None:
+                # Run full pipeline for the first trial or if no specific logic is defined
+                stage1_results = run_pipeline_stage(1, input_files, run_cfg, s1_args)
+                stage2_results, centroids = run_pipeline_stage(2, stage1_results, run_cfg, s2_args)
+                stage3_results = run_pipeline_stage(3, stage2_results, run_cfg, s3_args, centroids=centroids)
             else:
-                if key in ('nirspec_mask_width', 'soss_inner_mask_width', 'soss_outer_mask_width'):
-                    # --- Stage 1 on darkcurrent‐stepped files ---
-                    always_skip1 = ['DQInitStep', 'EmiCorrStep', 'SaturationStep','ResetStep','SuperBiasStep','RefPixStep', 'DarkCurrentStep']
-                    stage1_skip = get_stage_skips(
-                        cfg,
-                        stage1_steps,
-                        always_skip=always_skip1,
-                        special_one_over_f=True
-                    )
-                    
-                    possible_steps_int1 = ["darkcurrentstep", "refpixstep", "superbiasstep", 'resetstep','saturationstep','emicorrstep','dqinitstep']
-
-                    filenames_int1 = make_step_filenames(
-                        input_files,
-                        output_dir=outdir_s1,
-                        possible_steps=possible_steps_int1
-                    )
-
-
-
-
-                    stage1_results = run_stage1(
-                        filenames_int1,
-                        mode=run_cfg['observing_mode'],
-                        soss_background_model=run_cfg['soss_background_file'],
-                        baseline_ints=run_cfg['baseline_ints'],
-                        oof_method=run_cfg['oof_method'],
-                        superbias_method=run_cfg['superbias_method'],
-                        soss_timeseries=run_cfg['soss_timeseries'],
-                        soss_timeseries_o2=run_cfg['soss_timeseries_o2'],
-                        save_results=True,
-                        pixel_masks=run_cfg['outlier_maps'],
-                        force_redo=True,
-                        flag_up_ramp=run_cfg['flag_up_ramp'],
-                        rejection_threshold=run_cfg['jump_threshold'],
-                        flag_in_time=run_cfg['flag_in_time'],
-                        time_rejection_threshold=run_cfg['time_jump_threshold'],
-                        output_tag=run_cfg['output_tag'],
-                        skip_steps=stage1_skip,
-                        do_plot=False,
-                        soss_inner_mask_width=run_cfg['soss_inner_mask_width'],
-                        soss_outer_mask_width=run_cfg['soss_outer_mask_width'],
-                        nirspec_mask_width=run_cfg['nirspec_mask_width'],
-                        centroids=run_cfg['centroids'],
-                        hot_pixel_map=run_cfg['hot_pixel_map'],
-                        miri_drop_groups=run_cfg['miri_drop_groups'],
-                        **run_cfg.get('stage1_kwargs', {}),
-                        **s1_args
-                    )
-                    
-
-                    # --- Stage 2 on those results ---
-                    always_skip2 = []
-                    stage2_skip = get_stage_skips(
-                        cfg,
-                        stage2_steps,
-                        always_skip=always_skip2,
-                        special_one_over_f=False
-                    )
-                    
-                    stage2_results, centroids = run_stage2(
-                        stage1_results,
-                        mode=run_cfg['observing_mode'],
-                        soss_background_model=run_cfg['soss_background_file'],
-                        baseline_ints=run_cfg['baseline_ints'],
-                        save_results=True,
-                        force_redo=True,
-                        space_thresh=run_cfg['space_outlier_threshold'],
-                        time_thresh=run_cfg['time_outlier_threshold'],
-                        remove_components=run_cfg['remove_components'],
-                        pca_components=run_cfg['pca_components'],
-                        soss_timeseries=run_cfg['soss_timeseries'],
-                        soss_timeseries_o2=run_cfg['soss_timeseries_o2'],
-                        oof_method=run_cfg['oof_method'],
-                        output_tag=run_cfg['output_tag'],
-                        smoothing_scale=run_cfg['smoothing_scale'],
-                        skip_steps=stage2_skip,
-                        generate_lc=run_cfg['generate_lc'],
-                        soss_inner_mask_width=run_cfg['soss_inner_mask_width'],
-                        soss_outer_mask_width=run_cfg['soss_outer_mask_width'],
-                        nirspec_mask_width=run_cfg['nirspec_mask_width'],     
-                        pixel_masks=run_cfg['outlier_maps'],
-                        generate_order0_mask=run_cfg['generate_order0_mask'],
-                        f277w=run_cfg['f277w'],
-                        do_plot=False,
-                        centroids=run_cfg['centroids'],
-                        miri_trace_width=run_cfg['miri_trace_width'],
-                        miri_background_width=run_cfg['miri_background_width'],
-                        miri_background_method=run_cfg['miri_background_method'],
-                        **run_cfg.get('stage2_kwargs', {}),
-                        **s2_args
-                    )
-                    if isinstance(centroids, np.ndarray):
-                        centroids = pd.DataFrame(centroids.T, columns=["xpos","ypos"])
-                    
-                    # --- Stage 3 on those results ---
-                    always_skip3 = []
-                    stage3_skip = get_stage_skips(
-                        cfg,
-                        stage3_steps,
-                        always_skip=always_skip3,
-                        special_one_over_f=False
-                    )
-               
-                    this_centroid = cfg['centroids'] if cfg['centroids'] is not None else centroids
-                    stage3_results = run_stage3(
-                        stage2_results,
-                        save_results=True,
-                        force_redo=True,
-                        extract_method=run_cfg['extract_method'],
-                        soss_specprofile=run_cfg['soss_specprofile'],
-                        centroids=this_centroid,
-                        extract_width=run_cfg['extract_width'],
-                        st_teff=run_cfg['st_teff'],
-                        st_logg=run_cfg['st_logg'],
-                        st_met=run_cfg['st_met'],
-                        planet_letter=run_cfg['planet_letter'],
-                        output_tag=run_cfg['output_tag'],
-                        do_plot=False,
-                        skip_steps=stage3_skip,
-                        **run_cfg.get('stage3_kwargs', {}),
-                        **s3_args
-                    )                        
-
-
-                elif key in ('time_jump_threshold', 'jump_threshold','time_rejection_threshold', 'time_window'):
-
-                    # --- Stage 1 on the “linearized” intermediates ---
-                    always_skip1 = ['DQInitStep', 'EmiCorrStep', 'SaturationStep','ResetStep','SuperBiasStep','RefPixStep', 'DarkCurrentStep',
-                                    'OneOverFStep', 'LinearityStep']
-                    stage1_skip = get_stage_skips(
-                        cfg,
-                        stage1_steps,
-                        always_skip=always_skip1,
-                        special_one_over_f=True
-                    )
-
-                    possible_steps_int2 = ['linearitystep','oneoverfstep',"darkcurrentstep", "refpixstep", "superbiasstep", 'resetstep','saturationstep','emicorrstep','dqinitstep']
-
+                # Optimized rerun based on the parameter
+                rerun_from = rerun_logic['rerun_from_stage']
+                
+                if rerun_from == 1:
+                    filenames_int1 = make_step_filenames(input_files, outdir_s1, rerun_logic['stage1_input_steps'])
+                    stage1_results = run_pipeline_stage(1, filenames_int1, run_cfg, s1_args, skips=rerun_logic['stage1_skips'], do_plot=False)
+                    stage2_results, centroids = run_pipeline_stage(2, stage1_results, run_cfg, s2_args, do_plot=False)
+                    stage3_results = run_pipeline_stage(3, stage2_results, run_cfg, s3_args, centroids=centroids, do_plot=False)
+                
+                elif rerun_from == 2:
                     filenames_int2 = make_step_filenames(
-                        input_files,
-                        output_dir=outdir_s1,
-                        possible_steps=possible_steps_int2,
-                    )                    
-
-                    
-                    stage1_results = run_stage1(
-                        filenames_int2,
-                        mode=run_cfg['observing_mode'],
-                        soss_background_model=run_cfg['soss_background_file'],
-                        baseline_ints=run_cfg['baseline_ints'],
-                        oof_method=run_cfg['oof_method'],
-                        superbias_method=run_cfg['superbias_method'],
-                        soss_timeseries=run_cfg['soss_timeseries'],
-                        soss_timeseries_o2=run_cfg['soss_timeseries_o2'],
-                        save_results=True,
-                        pixel_masks=run_cfg['outlier_maps'],
-                        force_redo=True,
-                        flag_up_ramp=run_cfg['flag_up_ramp'],
-                        rejection_threshold=run_cfg['jump_threshold'],
-                        flag_in_time=run_cfg['flag_in_time'],
-                        time_rejection_threshold=run_cfg['time_jump_threshold'],
-                        output_tag=run_cfg['output_tag'],
-                        skip_steps=stage1_skip,
-                        do_plot=False,
-                        soss_inner_mask_width=run_cfg['soss_inner_mask_width'],
-                        soss_outer_mask_width=run_cfg['soss_outer_mask_width'],
-                        nirspec_mask_width=run_cfg['nirspec_mask_width'],
-                        centroids=run_cfg['centroids'],
-                        hot_pixel_map=run_cfg['hot_pixel_map'],
-                        miri_drop_groups=run_cfg['miri_drop_groups'],
-                        **run_cfg.get('stage1_kwargs', {}),
-                        **s1_args
+                        input_files, outdir_s2, rerun_logic['stage2_input_steps']['primary'],
+                        output_dir_2nd=outdir_s1, possible_steps_2nd=rerun_logic['stage2_input_steps']['secondary']
                     )
-                   
+                    stage2_results, centroids = run_pipeline_stage(2, filenames_int2, run_cfg, s2_args, skips=rerun_logic['stage2_skips'], do_plot=False)
+                    stage3_results = run_pipeline_stage(3, stage2_results, run_cfg, s3_args, centroids=centroids, do_plot=False)
 
-                    # --- Stage 2 on those results ---
-                    always_skip2 = []
-                    stage2_skip = get_stage_skips(
-                        cfg,
-                        stage2_steps,
-                        always_skip=always_skip2,
-                        special_one_over_f=False
-                    )
-
-                    
-                    stage2_results, centroids = run_stage2(
-                        stage1_results,
-                        mode=run_cfg['observing_mode'],
-                        soss_background_model=run_cfg['soss_background_file'],
-                        baseline_ints=run_cfg['baseline_ints'],
-                        save_results=True,
-                        force_redo=True,
-                        space_thresh=run_cfg['space_outlier_threshold'],
-                        time_thresh=run_cfg['time_outlier_threshold'],
-                        remove_components=run_cfg['remove_components'],
-                        pca_components=run_cfg['pca_components'],
-                        soss_timeseries=run_cfg['soss_timeseries'],
-                        soss_timeseries_o2=run_cfg['soss_timeseries_o2'],
-                        oof_method=run_cfg['oof_method'],
-                        output_tag=run_cfg['output_tag'],
-                        smoothing_scale=run_cfg['smoothing_scale'],
-                        skip_steps=stage2_skip,
-                        generate_lc=run_cfg['generate_lc'],
-                        soss_inner_mask_width=run_cfg['soss_inner_mask_width'],
-                        soss_outer_mask_width=run_cfg['soss_outer_mask_width'],
-                        nirspec_mask_width=run_cfg['nirspec_mask_width'],
-                        pixel_masks=run_cfg['outlier_maps'],
-                        generate_order0_mask=run_cfg['generate_order0_mask'],
-                        f277w=run_cfg['f277w'],
-                        do_plot=False,
-                        centroids=run_cfg['centroids'],
-                        miri_trace_width=run_cfg['miri_trace_width'],
-                        miri_background_width=run_cfg['miri_background_width'],
-                        miri_background_method=run_cfg['miri_background_method'],
-                        **run_cfg.get('stage2_kwargs', {}),
-                        **s2_args
-                    )
-                    if isinstance(centroids, np.ndarray):
-                        centroids = pd.DataFrame(centroids.T, columns=["xpos","ypos"])                        
-             
-
-                    # --- Stage 3 on those results ---
-                    always_skip3 = []
-                    stage3_skip = get_stage_skips(
-                        cfg,
-                        stage3_steps,
-                        always_skip=always_skip3,
-                        special_one_over_f=False
-                    )
-
-                  
-                    this_centroid = cfg['centroids'] if cfg['centroids'] is not None else centroids
-                    stage3_results = run_stage3(
-                        stage2_results,
-                        save_results=True,
-                        force_redo=True,
-                        extract_method=run_cfg['extract_method'],
-                        soss_specprofile=run_cfg['soss_specprofile'],
-                        centroids=this_centroid,
-                        extract_width=run_cfg['extract_width'],
-                        st_teff=run_cfg['st_teff'],
-                        st_logg=run_cfg['st_logg'],
-                        st_met=run_cfg['st_met'],
-                        planet_letter=run_cfg['planet_letter'],
-                        output_tag=run_cfg['output_tag'],
-                        do_plot=False,
-                        skip_steps=stage3_skip,
-                        **run_cfg.get('stage3_kwargs', {}),
-                        **s3_args
-                    )
-
-
-
-
-                elif key in ('miri_trace_width', 'miri_background_width'):
-                    # Stage 2 on precomputed Stage-1 intermediates (filenames_int3)
-                    always_skip2 = ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep', 'WaveCorrStep', 'FlatFieldStep']
-                    stage2_skip = get_stage_skips(
-                        cfg,
-                        stage2_steps,
-                        always_skip=always_skip2,
-                        special_one_over_f=False
-                    )
-
-
-                    possible_steps_int3 = ['flatfieldstep','wavecorrstep','sourcetypestep','extract2dstep','assignwcsstep']
-
+                elif rerun_from == 3:
                     filenames_int3 = make_step_filenames(
-                        input_files,
-                        output_dir=outdir_s2,   # Stage 2 outputs
-                        possible_steps=possible_steps_int3,
-                        output_dir_2nd=outdir_s1,   # Fall back to Stage 1 outputs
-                        possible_steps_2nd=["gainscalestep", 'rampfitstep', 'jumpstep']
+                        input_files, outdir_s2, rerun_logic['stage3_input_steps']['primary'],
+                        output_dir_2nd=outdir_s1, possible_steps_2nd=rerun_logic['stage3_input_steps']['secondary']
                     )
-
-
-                   
-                    stage2_results, centroids = run_stage2(
-                        filenames_int3,
-                        mode=run_cfg['observing_mode'],
-                        soss_background_model=run_cfg['soss_background_file'],
-                        baseline_ints=run_cfg['baseline_ints'],
-                        save_results=True,
-                        force_redo=True,
-                        space_thresh=run_cfg['space_outlier_threshold'],
-                        time_thresh=run_cfg['time_outlier_threshold'],
-                        remove_components=run_cfg['remove_components'],
-                        pca_components=run_cfg['pca_components'],
-                        soss_timeseries=run_cfg['soss_timeseries'],
-                        soss_timeseries_o2=run_cfg['soss_timeseries_o2'],
-                        oof_method=run_cfg['oof_method'],
-                        output_tag=run_cfg['output_tag'],
-                        smoothing_scale=run_cfg['smoothing_scale'],
-                        skip_steps=stage2_skip,
-                        generate_lc=run_cfg['generate_lc'],
-                        soss_inner_mask_width=run_cfg['soss_inner_mask_width'],
-                        soss_outer_mask_width=run_cfg['soss_outer_mask_width'],
-                        nirspec_mask_width=run_cfg['nirspec_mask_width'],
-                        pixel_masks=run_cfg['outlier_maps'],
-                        generate_order0_mask=run_cfg['generate_order0_mask'],
-                        f277w=run_cfg['f277w'],
-                        do_plot=False,
-                        centroids=run_cfg['centroids'],
-                        miri_trace_width=run_cfg['miri_trace_width'],
-                        miri_background_width=run_cfg['miri_background_width'],
-                        miri_background_method=run_cfg['miri_background_method'],
-                        **run_cfg.get('stage2_kwargs', {}),
-                        **s2_args
-                    )
-                    if isinstance(centroids, np.ndarray):
-                        centroids = pd.DataFrame(centroids.T, columns=["xpos","ypos"])                        
-    
-                    # Stage 3
-                    always_skip3 = []
-                    stage3_skip = get_stage_skips(
-                        cfg,
-                        stage3_steps,
-                        always_skip=always_skip3,
-                        special_one_over_f=False
-                    )
-
-                    this_centroid = cfg['centroids'] if cfg['centroids'] is not None else centroids
-                    stage3_results = run_stage3(
-                        stage2_results,
-                        save_results=True,
-                        force_redo=True,
-                        extract_method=run_cfg['extract_method'],
-                        soss_specprofile=run_cfg['soss_specprofile'],
-                        centroids=this_centroid,
-                        extract_width=run_cfg['extract_width'],
-                        st_teff=run_cfg['st_teff'],
-                        st_logg=run_cfg['st_logg'],
-                        st_met=run_cfg['st_met'],
-                        planet_letter=run_cfg['planet_letter'],
-                        output_tag=run_cfg['output_tag'],
-                        do_plot=False,
-                        skip_steps=stage3_skip,
-                        **run_cfg.get('stage3_kwargs', {}),
-                        **s3_args
-                    )
-
-
-                elif key in ('space_outlier_threshold', 'space_thresh', 'time_outlier_threshold', 'time_thresh','box_size', 'window_size'):
-                    # Stage 2 on precomputed Stage-1 intermediates (filenames_int3)
-                    always_skip2 =  ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep', 'WaveCorrStep', 'FlatFieldStep','BackgroundStep','OneOverFStep']
-                    stage2_skip = get_stage_skips(
-                        cfg,
-                        stage2_steps,
-                        always_skip=always_skip2,
-                        special_one_over_f=False
-                    )
-
-                    possible_steps_int4 = ['oneoverfstep','backgroundstep','flatfieldstep','wavecorrstep','sourcetypestep','extract2dstep','assignwcsstep']
-
-                    filenames_int4 = make_step_filenames(
-                        input_files,
-                        output_dir=outdir_s2,   # Stage 2 outputs
-                        possible_steps=possible_steps_int4,
-                        output_dir_2nd=outdir_s1,   # Fall back to Stage 1 outputs
-                        possible_steps_2nd=["gainscalestep", 'rampfitstep', 'jumpstep']
-                    )                    
-
-                   
-                    stage2_results, centroids = run_stage2(
-                        filenames_int4,
-                        mode=run_cfg['observing_mode'],
-                        soss_background_model=run_cfg['soss_background_file'],
-                        baseline_ints=run_cfg['baseline_ints'],
-                        save_results=True,
-                        force_redo=True,
-                        space_thresh=run_cfg['space_outlier_threshold'],
-                        time_thresh=run_cfg['time_outlier_threshold'],
-                        remove_components=run_cfg['remove_components'],
-                        pca_components=run_cfg['pca_components'],
-                        soss_timeseries=run_cfg['soss_timeseries'],
-                        soss_timeseries_o2=run_cfg['soss_timeseries_o2'],
-                        oof_method=run_cfg['oof_method'],
-                        output_tag=run_cfg['output_tag'],
-                        smoothing_scale=run_cfg['smoothing_scale'],
-                        skip_steps=stage2_skip,
-                        generate_lc=run_cfg['generate_lc'],
-                        soss_inner_mask_width=run_cfg['soss_inner_mask_width'],
-                        soss_outer_mask_width=run_cfg['soss_outer_mask_width'],
-                        nirspec_mask_width=run_cfg['nirspec_mask_width'],
-                        pixel_masks=run_cfg['outlier_maps'],
-                        generate_order0_mask=run_cfg['generate_order0_mask'],
-                        f277w=run_cfg['f277w'],
-                        do_plot=False,
-                        centroids=run_cfg['centroids'],
-                        miri_trace_width=run_cfg['miri_trace_width'],
-                        miri_background_width=run_cfg['miri_background_width'],
-                        miri_background_method=run_cfg['miri_background_method'],
-                        **run_cfg.get('stage2_kwargs', {}),
-                        **s2_args
-                    )
-                    if isinstance(centroids, np.ndarray):
-                        centroids = pd.DataFrame(centroids.T, columns=["xpos","ypos"])                        
-    
-                    # Stage 3
-                    always_skip3 = []
-                    stage3_skip = get_stage_skips(
-                        cfg,
-                        stage3_steps,
-                        always_skip=always_skip3,
-                        special_one_over_f=False
-                    )
-
-                    this_centroid = cfg['centroids'] if cfg['centroids'] is not None else centroids
-                    stage3_results = run_stage3(
-                        stage2_results,
-                        save_results=True,
-                        force_redo=True,
-                        extract_method=run_cfg['extract_method'],
-                        soss_specprofile=run_cfg['soss_specprofile'],
-                        centroids=this_centroid,
-                        extract_width=run_cfg['extract_width'],
-                        st_teff=run_cfg['st_teff'],
-                        st_logg=run_cfg['st_logg'],
-                        st_met=run_cfg['st_met'],
-                        planet_letter=run_cfg['planet_letter'],
-                        output_tag=run_cfg['output_tag'],
-                        do_plot=False,
-                        skip_steps=stage3_skip,
-                        **run_cfg.get('stage3_kwargs', {}),
-                        **s3_args
-                    )
-               
-
-
-                elif key == 'extract_width':
-                    # Stage 2 on precomputed Stage-1 intermediates (filenames_int4)
-                    always_skip2 =  ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep', 'WaveCorrStep', 'FlatFieldStep','BackgroundStep','OneOverFStep']
-                    stage2_skip = get_stage_skips(
-                        cfg,
-                        stage2_steps,
-                        always_skip=always_skip2,
-                        special_one_over_f=False
-                    )
-
-
-                    possible_steps_int5 = ['tracingstep','pcareconstructstep','badpixstep','oneoverfstep','backgroundstep','flatfieldstep','wavecorrstep','sourcetypestep','extract2dstep','assignwcsstep']
-
-                    filenames_int5 = make_step_filenames(
-                        input_files,
-                        output_dir=outdir_s2,   # Stage 2 outputs
-                        possible_steps=possible_steps_int5,
-                        output_dir_2nd=outdir_s1,   # Fall back to Stage 1 outputs
-                        possible_steps_2nd=["gainscalestep", 'rampfitstep', 'jumpstep']
-                    )                            
-
-           
-                    stage2_results, centroids = run_stage2(
-                        filenames_int5,
-                        mode=run_cfg['observing_mode'],
-                        soss_background_model=run_cfg['soss_background_file'],
-                        baseline_ints=run_cfg['baseline_ints'],
-                        save_results=True,
-                        force_redo=True,
-                        space_thresh=run_cfg['space_outlier_threshold'],
-                        time_thresh=run_cfg['time_outlier_threshold'],
-                        remove_components=run_cfg['remove_components'],
-                        pca_components=run_cfg['pca_components'],
-                        soss_timeseries=run_cfg['soss_timeseries'],
-                        soss_timeseries_o2=run_cfg['soss_timeseries_o2'],
-                        oof_method=run_cfg['oof_method'],
-                        output_tag=run_cfg['output_tag'],
-                        smoothing_scale=run_cfg['smoothing_scale'],
-                        skip_steps=stage2_skip,
-                        generate_lc=run_cfg['generate_lc'],
-                        soss_inner_mask_width=run_cfg['soss_inner_mask_width'],
-                        soss_outer_mask_width=run_cfg['soss_outer_mask_width'],
-                        nirspec_mask_width=run_cfg['nirspec_mask_width'],
-                        pixel_masks=run_cfg['outlier_maps'],
-                        generate_order0_mask=run_cfg['generate_order0_mask'],
-                        f277w=run_cfg['f277w'],
-                        do_plot=False,
-                        centroids=run_cfg['centroids'],
-                        miri_trace_width=run_cfg['miri_trace_width'],
-                        miri_background_width=run_cfg['miri_background_width'],
-                        miri_background_method=run_cfg['miri_background_method'],
-                        **run_cfg.get('stage2_kwargs', {}),
-                        **s2_args
-                    )
-                    if isinstance(centroids, np.ndarray):
-                        centroids = pd.DataFrame(centroids.T, columns=["xpos","ypos"])                        
-                  
-
-                    # Stage 3 with trial-specific extract_width
-                    always_skip3 = []
-                    stage3_skip = get_stage_skips(
-                        cfg,
-                        stage3_steps,
-                        always_skip=always_skip3,
-                        special_one_over_f=False
-                    )
-
-           
-                    this_centroid = cfg['centroids'] if cfg['centroids'] is not None else centroids
-                    stage3_results = run_stage3(
-                        stage2_results,
-                        save_results=True,
-                        force_redo=True,
-                        extract_method=run_cfg['extract_method'],
-                        soss_specprofile=run_cfg['soss_specprofile'],
-                        centroids=this_centroid,
-                        extract_width=run_cfg['extract_width'],
-                        st_teff=run_cfg['st_teff'],
-                        st_logg=run_cfg['st_logg'],
-                        st_met=run_cfg['st_met'],
-                        planet_letter=run_cfg['planet_letter'],
-                        output_tag=run_cfg['output_tag'],
-                        do_plot=False,
-                        skip_steps=stage3_skip,
-                        **run_cfg.get('stage3_kwargs', {}),
-                        **s3_args
-                    )
+                    # For stage 3 rerun, we need to re-run stage 2 but skip all steps to get the correct inputs
+                    stage2_results, centroids = run_pipeline_stage(2, filenames_int3, run_cfg, s2_args, 
+                        skips=stage2_steps, do_plot=False)
+                    stage3_results = run_pipeline_stage(3, stage2_results, run_cfg, s3_args, do_plot=False, centroids=centroids)
     
 
             # ----------------------------------------------------------------
