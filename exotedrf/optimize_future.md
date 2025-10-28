@@ -2,7 +2,7 @@ This serves to aim as a guide for next steps
 
 1. (Completed) remove big if/elif from optimize.py
 
-2. Function to extract at any given stage to calculate scatter
+2. Function to box extract at any given stage to calculate scatter
    
 2.  Function to find minimum of residual at a given cost aka. dppm/dstep=0
 
