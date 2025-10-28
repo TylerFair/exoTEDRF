@@ -948,11 +948,13 @@ def main():
 
     count = 1  # Step counter for progress tracking
     
-    # ------------------------------------------------------
-    # Coordinate descent optimization loop over parameters
-    # ------------------------------------------------------
 
-    # Constants for pipeline stage configurations to reduce redundancy
+    # Constants for pipeline stage configurations 
+    # The idea is that we only have a few steps that are being optimized
+    # so we can just set defining dicts. for non-repetition. 
+    # i.e. starting from optimizing jump 
+    # will go to STAGE1_SKIP_CONFIG['from_linearity']
+    # skipping previous steps and doing the next ones. 
     STAGE1_SKIP_CONFIG = {
         'from_darkcurrent': {
             'always_skip': ['DQInitStep', 'EmiCorrStep', 'SaturationStep', 'ResetStep', 'SuperBiasStep', 'RefPixStep', 'DarkCurrentStep'],
@@ -990,9 +992,9 @@ def main():
         },
     }
 
-    # This dictionary maps optimization parameters to the pipeline rerun strategy.
+    # this  maps optimization parameters to the pipeline rerun strategy.
     # Each entry defines which stages to run, what steps to skip, and where to
-    # find input files, effectively replacing the large if/elif structure.
+    # find input files,  replacing the previous if/elif structure.
     PARAM_RUN_CONFIG = {
         'default': {
             'run_stages': [1, 2, 3],
@@ -1028,7 +1030,7 @@ def main():
             'stage3': {'always_skip': []},
         },
     }
-    # Flatten the config for easy lookup. Now each parameter maps directly to its run config.
+    # flatten the config for easy lookup. Now each parameter maps directly to its run config.
     param_map = {}
     for keys, config in PARAM_RUN_CONFIG.items():
         if isinstance(keys, tuple):
@@ -1039,7 +1041,7 @@ def main():
 
     def run_pipeline_stages(run_cfg, param_key, s1_args, s2_args, s3_args):
         """
-        Dynamically runs pipeline stages based on the parameter being optimized.
+        runs pipeline stages based on the parameter being optimized.
         """
         config = param_map.get(param_key, param_map.get('default'))
         run_stages = config['run_stages']
@@ -1047,7 +1049,6 @@ def main():
         stage1_results, stage2_results, stage3_results = None, None, None
         centroids = run_cfg.get('centroids')
 
-        # Determine input files for the first stage in the sequence
         first_stage = run_stages[0]
         stage_config = config.get(f'stage{first_stage}', {})
         
@@ -1062,7 +1063,7 @@ def main():
         else:
             files = input_files
 
-        # Execute the pipeline stages
+        #  run pipeline stages
         if 1 in run_stages:
             s1_conf = config.get('stage1', {})
             stage1_skip = get_stage_skips(run_cfg, stage1_steps, always_skip=s1_conf.get('always_skip', []), special_one_over_f=True)
@@ -1170,10 +1171,6 @@ def main():
             ]
             stage3_steps = []
 
-            # ----------------------------------------------------------------
-            # The giant if/elif structure below chooses the fastest rerun path
-            # depending on which parameter is being optimized
-            # ----------------------------------------------------------------
             param_key = key if best_cost is not None else None
             stage2_results, stage3_results = run_pipeline_stages(
                 run_cfg, param_key, s1_args, s2_args, s3_args
@@ -1217,7 +1214,7 @@ def main():
         fancyprint(f"Best {key} = {best_val} (cost={best_cost:.12f})")
 
     # ------------------------------------------------------
-    # After loop: final reporting & fast validation run
+    # final reporting & fast validation run
     # ------------------------------------------------------
 
     # Compute total runtime and print it in h:mm:ss format
