@@ -73,7 +73,7 @@ from astropy.io import fits
 from exotedrf.utils import parse_config, unpack_input_dir, fancyprint
 from exotedrf.stage1 import run_stage1
 from exotedrf.stage2 import run_stage2
-from exotedrf.stage3 import run_stage3
+from exotedrf.stage3 import run_stage3, do_box_extraction
 
 
 # ======== OUTPUT DIRECTORY DEFINITIONS ========
