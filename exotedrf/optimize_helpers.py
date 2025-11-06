@@ -215,6 +215,7 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
     """
     fancyprint(f'=== Extracting {instrument} at current step ===')
     fancyprint(f'  datafile: {datafile if isinstance(datafile, str) else "datamodel"}')
+    fancyprint(f'  extract_width: {extract_width}')
 
     # load with flags applied
     fancyprint(f'  Loading data with DQ flags...')
@@ -271,6 +272,9 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
         flux = do_box_extraction_nanaware(cube, y1, width=extract_width, extract_start=xstart)
         wave = get_wave_nirspec(datafile, centroids, cube.shape[0], cube.shape[2])
 
+        fancyprint(f'  NIRSpec extraction: flux.shape={flux.shape}, wave.shape={wave.shape}')
+        fancyprint(f'  Flux stats: sum={np.nansum(flux):.6e}, mean={np.nanmean(flux):.6e}, median={np.nanmedian(flux):.6e}')
+
         return {'Wave': wave, 'Flux': flux}, centroids
 
     elif instrument == 'NIRISS':
@@ -283,11 +287,15 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
         else:
             w1 = w2 = extract_width
 
+        fancyprint(f'  NIRISS extraction widths: O1={w1}, O2={w2}')
+
         flux_o1 = do_box_extraction_nanaware(cube, y1, width=w1)
+        fancyprint(f'  O1 flux.shape={flux_o1.shape}, sum={np.nansum(flux_o1):.6e}, mean={np.nanmean(flux_o1):.6e}')
 
         ii = np.where(np.isfinite(y2))[0]
         y2_finite = y2[ii]
         flux_o2 = do_box_extraction_nanaware(cube, y2_finite, width=w2, extract_end=len(y2_finite))
+        fancyprint(f'  O2 flux.shape={flux_o2.shape}, sum={np.nansum(flux_o2):.6e}, mean={np.nanmean(flux_o2):.6e}')
 
         wave_o1, wave_o2 = get_wave_soss(datafile)
 
