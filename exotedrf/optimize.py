@@ -849,12 +849,6 @@ def get_stage_skips(cfg, steps, always_skip=None, special_one_over_f=False):
 # ----------------------------------------
 
 def main():
-    """
-     optimization workflow:
-    1. Parse config and identify optimizable parameters
-    2. Run optimization on FIRST SEGMENT ONLY
-    3. Run full pipeline on ALL SEGMENTS with optimal parameters
-    """
     # ===== SETUP =====
     parser = argparse.ArgumentParser(description="exoTEDRF Optimizer")
     parser.add_argument("--config", default="run_optimize.yaml", help="Config YAML")
@@ -1027,82 +1021,183 @@ def main():
                     # Build skip list: skip everything after this step
                     skip_list = checkpoint['skip_after'].copy()
 
+                    # Build JumpStep kwargs if needed
+                    s1_args = {}
+                    if param_name == 'time_window':
+                        s1_args['JumpStep'] = {'time_window': param_value}
+
                     # Run Stage 1 with force_redo to rerun the optimized step
                     stage1_results = run_stage1(
                         single_segment,
-                        mode=cfg['observing_mode'],
-                        baseline_ints=baseline_ints,
+                        mode=run_cfg['observing_mode'],
+                        soss_background_model=run_cfg.get('soss_background_file'),
+                        baseline_ints=run_cfg['baseline_ints'],
+                        oof_method=run_cfg.get('oof_method'),
+                        superbias_method=run_cfg.get('superbias_method'),
+                        soss_timeseries=run_cfg.get('soss_timeseries'),
+                        soss_timeseries_o2=run_cfg.get('soss_timeseries_o2'),
                         save_results=True,
+                        pixel_masks=run_cfg.get('outlier_maps'),
                         force_redo=True,
-                        output_tag=cfg['output_tag'],
+                        flag_up_ramp=run_cfg.get('flag_up_ramp', False),
+                        rejection_threshold=run_cfg.get('jump_threshold', 15),
+                        flag_in_time=run_cfg.get('flag_in_time', True),
+                        time_rejection_threshold=run_cfg.get('time_jump_threshold'),
+                        output_tag=run_cfg['output_tag'],
                         skip_steps=skip_list,
-                        # Pass all relevant parameters
+                        do_plot=run_cfg.get('do_plots', False),
                         soss_inner_mask_width=run_cfg.get('soss_inner_mask_width'),
                         soss_outer_mask_width=run_cfg.get('soss_outer_mask_width'),
                         nirspec_mask_width=run_cfg.get('nirspec_mask_width'),
-                        time_rejection_threshold=run_cfg.get('time_jump_threshold'),
-                        jump_threshold=run_cfg.get('jump_threshold', 15),
-                        flag_in_time=cfg.get('flag_in_time', True),
-                        flag_up_ramp=cfg.get('flag_up_ramp', False),
-                        **cfg.get('stage1_kwargs', {})
+                        centroids=run_cfg.get('centroids'),
+                        hot_pixel_map=run_cfg.get('hot_pixel_map'),
+                        miri_drop_groups=run_cfg.get('miri_drop_groups'),
+                        **run_cfg.get('stage1_kwargs', {}),
+                        **s1_args
                     )
 
                     # Extract from Stage 1 output
                     datafile = stage1_results[0]
 
                 elif checkpoint['stage'] == 2:
-                    # First, need Stage 1 results
+                    # First, need Stage 1 results (use cached)
                     stage1_results = run_stage1(
                         single_segment,
-                        mode=cfg['observing_mode'],
-                        baseline_ints=baseline_ints,
+                        mode=run_cfg['observing_mode'],
+                        soss_background_model=run_cfg.get('soss_background_file'),
+                        baseline_ints=run_cfg['baseline_ints'],
+                        oof_method=run_cfg.get('oof_method'),
+                        superbias_method=run_cfg.get('superbias_method'),
+                        soss_timeseries=run_cfg.get('soss_timeseries'),
+                        soss_timeseries_o2=run_cfg.get('soss_timeseries_o2'),
                         save_results=True,
+                        pixel_masks=run_cfg.get('outlier_maps'),
                         force_redo=False,  # Use cached
-                        output_tag=cfg['output_tag'],
-                        **cfg.get('stage1_kwargs', {})
+                        flag_up_ramp=run_cfg.get('flag_up_ramp', False),
+                        rejection_threshold=run_cfg.get('jump_threshold', 15),
+                        flag_in_time=run_cfg.get('flag_in_time', True),
+                        time_rejection_threshold=run_cfg.get('time_jump_threshold'),
+                        output_tag=run_cfg['output_tag'],
+                        do_plot=run_cfg.get('do_plots', False),
+                        soss_inner_mask_width=run_cfg.get('soss_inner_mask_width'),
+                        soss_outer_mask_width=run_cfg.get('soss_outer_mask_width'),
+                        nirspec_mask_width=run_cfg.get('nirspec_mask_width'),
+                        centroids=run_cfg.get('centroids'),
+                        hot_pixel_map=run_cfg.get('hot_pixel_map'),
+                        miri_drop_groups=run_cfg.get('miri_drop_groups'),
+                        **run_cfg.get('stage1_kwargs', {})
                     )
 
                     # Build skip list for Stage 2
                     skip_list = checkpoint['skip_after'].copy()
 
+                    # Build BadPixStep kwargs if needed
+                    s2_args = {}
+                    badpix_kwargs = {}
+                    if param_name == 'box_size':
+                        badpix_kwargs['box_size'] = param_value
+                    if param_name == 'window_size':
+                        badpix_kwargs['window_size'] = param_value
+                    if badpix_kwargs:
+                        s2_args['BadPixStep'] = badpix_kwargs
+
                     # Run Stage 2
-                    stage2_results, _ = run_stage2(
+                    stage2_results, stage2_centroids = run_stage2(
                         stage1_results,
-                        mode=cfg['observing_mode'],
-                        baseline_ints=baseline_ints,
+                        mode=run_cfg['observing_mode'],
+                        soss_background_model=run_cfg.get('soss_background_file'),
+                        baseline_ints=run_cfg['baseline_ints'],
                         save_results=True,
                         force_redo=True,
-                        output_tag=cfg['output_tag'],
-                        skip_steps=skip_list,
                         space_thresh=run_cfg.get('space_outlier_threshold'),
                         time_thresh=run_cfg.get('time_outlier_threshold'),
+                        remove_components=run_cfg.get('remove_components'),
+                        pca_components=run_cfg.get('pca_components'),
+                        soss_timeseries=run_cfg.get('soss_timeseries'),
+                        soss_timeseries_o2=run_cfg.get('soss_timeseries_o2'),
+                        oof_method=run_cfg.get('oof_method'),
+                        output_tag=run_cfg['output_tag'],
+                        smoothing_scale=run_cfg.get('smoothing_scale'),
+                        skip_steps=skip_list,
+                        generate_lc=run_cfg.get('generate_lc'),
+                        soss_inner_mask_width=run_cfg.get('soss_inner_mask_width'),
+                        soss_outer_mask_width=run_cfg.get('soss_outer_mask_width'),
+                        nirspec_mask_width=run_cfg.get('nirspec_mask_width'),
+                        pixel_masks=run_cfg.get('outlier_maps'),
+                        generate_order0_mask=run_cfg.get('generate_order0_mask'),
+                        f277w=run_cfg.get('f277w'),
+                        do_plot=run_cfg.get('do_plots', False),
+                        centroids=run_cfg.get('centroids'),
                         miri_trace_width=run_cfg.get('miri_trace_width'),
                         miri_background_width=run_cfg.get('miri_background_width'),
-                        **cfg.get('stage2_kwargs', {})
+                        miri_background_method=run_cfg.get('miri_background_method'),
+                        **run_cfg.get('stage2_kwargs', {}),
+                        **s2_args
                     )
+
+                    if isinstance(stage2_centroids, np.ndarray):
+                        stage2_centroids = pd.DataFrame(stage2_centroids.T, columns=["xpos", "ypos"])
 
                     datafile = stage2_results[0]
 
                 elif checkpoint['stage'] == 3:
-                    # Need Stage 1 and 2 completed first
+                    # Need Stage 1 and 2 completed first (use cached)
                     stage1_results = run_stage1(
                         single_segment,
-                        mode=cfg['observing_mode'],
-                        baseline_ints=baseline_ints,
+                        mode=run_cfg['observing_mode'],
+                        soss_background_model=run_cfg.get('soss_background_file'),
+                        baseline_ints=run_cfg['baseline_ints'],
+                        oof_method=run_cfg.get('oof_method'),
+                        superbias_method=run_cfg.get('superbias_method'),
+                        soss_timeseries=run_cfg.get('soss_timeseries'),
+                        soss_timeseries_o2=run_cfg.get('soss_timeseries_o2'),
                         save_results=True,
+                        pixel_masks=run_cfg.get('outlier_maps'),
                         force_redo=False,
-                        output_tag=cfg['output_tag'],
-                        **cfg.get('stage1_kwargs', {})
+                        flag_up_ramp=run_cfg.get('flag_up_ramp', False),
+                        rejection_threshold=run_cfg.get('jump_threshold', 15),
+                        flag_in_time=run_cfg.get('flag_in_time', True),
+                        time_rejection_threshold=run_cfg.get('time_jump_threshold'),
+                        output_tag=run_cfg['output_tag'],
+                        do_plot=run_cfg.get('do_plots', False),
+                        soss_inner_mask_width=run_cfg.get('soss_inner_mask_width'),
+                        soss_outer_mask_width=run_cfg.get('soss_outer_mask_width'),
+                        nirspec_mask_width=run_cfg.get('nirspec_mask_width'),
+                        centroids=run_cfg.get('centroids'),
+                        hot_pixel_map=run_cfg.get('hot_pixel_map'),
+                        miri_drop_groups=run_cfg.get('miri_drop_groups'),
+                        **run_cfg.get('stage1_kwargs', {})
                     )
 
                     stage2_results, _ = run_stage2(
                         stage1_results,
-                        mode=cfg['observing_mode'],
-                        baseline_ints=baseline_ints,
+                        mode=run_cfg['observing_mode'],
+                        soss_background_model=run_cfg.get('soss_background_file'),
+                        baseline_ints=run_cfg['baseline_ints'],
                         save_results=True,
                         force_redo=False,
-                        output_tag=cfg['output_tag'],
-                        **cfg.get('stage2_kwargs', {})
+                        space_thresh=run_cfg.get('space_outlier_threshold'),
+                        time_thresh=run_cfg.get('time_outlier_threshold'),
+                        remove_components=run_cfg.get('remove_components'),
+                        pca_components=run_cfg.get('pca_components'),
+                        soss_timeseries=run_cfg.get('soss_timeseries'),
+                        soss_timeseries_o2=run_cfg.get('soss_timeseries_o2'),
+                        oof_method=run_cfg.get('oof_method'),
+                        output_tag=run_cfg['output_tag'],
+                        smoothing_scale=run_cfg.get('smoothing_scale'),
+                        generate_lc=run_cfg.get('generate_lc'),
+                        soss_inner_mask_width=run_cfg.get('soss_inner_mask_width'),
+                        soss_outer_mask_width=run_cfg.get('soss_outer_mask_width'),
+                        nirspec_mask_width=run_cfg.get('nirspec_mask_width'),
+                        pixel_masks=run_cfg.get('outlier_maps'),
+                        generate_order0_mask=run_cfg.get('generate_order0_mask'),
+                        f277w=run_cfg.get('f277w'),
+                        do_plot=run_cfg.get('do_plots', False),
+                        centroids=run_cfg.get('centroids'),
+                        miri_trace_width=run_cfg.get('miri_trace_width'),
+                        miri_background_width=run_cfg.get('miri_background_width'),
+                        miri_background_method=run_cfg.get('miri_background_method'),
+                        **run_cfg.get('stage2_kwargs', {})
                     )
 
                     datafile = stage2_results[0]
@@ -1170,43 +1265,83 @@ def main():
     # Stage 1
     stage1_results = run_stage1(
         input_files,
-        mode=cfg['observing_mode'],
-        baseline_ints=baseline_ints,
+        mode=final_cfg['observing_mode'],
+        soss_background_model=final_cfg.get('soss_background_file'),
+        baseline_ints=final_cfg['baseline_ints'],
+        oof_method=final_cfg.get('oof_method'),
+        superbias_method=final_cfg.get('superbias_method'),
+        soss_timeseries=final_cfg.get('soss_timeseries'),
+        soss_timeseries_o2=final_cfg.get('soss_timeseries_o2'),
         save_results=True,
+        pixel_masks=final_cfg.get('outlier_maps'),
         force_redo=True,
-        output_tag=cfg['output_tag'],
+        flag_up_ramp=final_cfg.get('flag_up_ramp', False),
+        rejection_threshold=final_cfg.get('jump_threshold', 15),
+        flag_in_time=final_cfg.get('flag_in_time', True),
+        time_rejection_threshold=final_cfg.get('time_jump_threshold'),
+        output_tag=final_cfg['output_tag'],
+        do_plot=final_cfg.get('do_plots', False),
         soss_inner_mask_width=final_cfg.get('soss_inner_mask_width'),
         soss_outer_mask_width=final_cfg.get('soss_outer_mask_width'),
         nirspec_mask_width=final_cfg.get('nirspec_mask_width'),
-        time_rejection_threshold=final_cfg.get('time_jump_threshold'),
-        **cfg.get('stage1_kwargs', {})
+        centroids=final_cfg.get('centroids'),
+        hot_pixel_map=final_cfg.get('hot_pixel_map'),
+        miri_drop_groups=final_cfg.get('miri_drop_groups'),
+        **final_cfg.get('stage1_kwargs', {})
     )
 
     # Stage 2
     stage2_results, final_centroids = run_stage2(
         stage1_results,
-        mode=cfg['observing_mode'],
-        baseline_ints=baseline_ints,
+        mode=final_cfg['observing_mode'],
+        soss_background_model=final_cfg.get('soss_background_file'),
+        baseline_ints=final_cfg['baseline_ints'],
         save_results=True,
         force_redo=True,
-        output_tag=cfg['output_tag'],
         space_thresh=final_cfg.get('space_outlier_threshold'),
         time_thresh=final_cfg.get('time_outlier_threshold'),
+        remove_components=final_cfg.get('remove_components'),
+        pca_components=final_cfg.get('pca_components'),
+        soss_timeseries=final_cfg.get('soss_timeseries'),
+        soss_timeseries_o2=final_cfg.get('soss_timeseries_o2'),
+        oof_method=final_cfg.get('oof_method'),
+        output_tag=final_cfg['output_tag'],
+        smoothing_scale=final_cfg.get('smoothing_scale'),
+        generate_lc=final_cfg.get('generate_lc'),
+        soss_inner_mask_width=final_cfg.get('soss_inner_mask_width'),
+        soss_outer_mask_width=final_cfg.get('soss_outer_mask_width'),
+        nirspec_mask_width=final_cfg.get('nirspec_mask_width'),
+        pixel_masks=final_cfg.get('outlier_maps'),
+        generate_order0_mask=final_cfg.get('generate_order0_mask'),
+        f277w=final_cfg.get('f277w'),
+        do_plot=final_cfg.get('do_plots', False),
+        centroids=final_cfg.get('centroids'),
         miri_trace_width=final_cfg.get('miri_trace_width'),
         miri_background_width=final_cfg.get('miri_background_width'),
-        **cfg.get('stage2_kwargs', {})
+        miri_background_method=final_cfg.get('miri_background_method'),
+        **final_cfg.get('stage2_kwargs', {})
     )
 
+    if isinstance(final_centroids, np.ndarray):
+        final_centroids = pd.DataFrame(final_centroids.T, columns=["xpos", "ypos"])
+
     # Stage 3
+    this_centroid = final_cfg.get('centroids') if final_cfg.get('centroids') is not None else final_centroids
     stage3_results = run_stage3(
         stage2_results,
         save_results=True,
         force_redo=True,
-        extract_method=cfg['extract_method'],
+        extract_method=final_cfg['extract_method'],
+        soss_specprofile=final_cfg.get('soss_specprofile'),
+        centroids=this_centroid,
         extract_width=final_cfg.get('extract_width'),
-        centroids=cfg.get('centroids') or final_centroids,
-        output_tag=cfg['output_tag'],
-        **cfg.get('stage3_kwargs', {})
+        st_teff=final_cfg.get('st_teff'),
+        st_logg=final_cfg.get('st_logg'),
+        st_met=final_cfg.get('st_met'),
+        planet_letter=final_cfg.get('planet_letter'),
+        output_tag=final_cfg['output_tag'],
+        do_plot=final_cfg.get('do_plots', False),
+        **final_cfg.get('stage3_kwargs', {})
     )
 
     #  diagnostics
@@ -1236,6 +1371,8 @@ def main():
     fancyprint(f"TOTAL RUNTIME: {h}h {m:02d}min {s:02d}s")
     fancyprint(f"OPTIMAL PARAMETERS: {current_best}")
     fancyprint(f"{'='*60}\n")
+
+
 
 
 
