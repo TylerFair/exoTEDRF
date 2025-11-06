@@ -74,6 +74,7 @@ from exotedrf.utils import parse_config, unpack_input_dir, fancyprint
 from exotedrf.stage1 import run_stage1
 from exotedrf.stage2 import run_stage2
 from exotedrf.stage3 import run_stage3, do_box_extraction
+from exotedrf.optimize_helpers import extract_at_step
 
 
 # ======== OUTPUT DIRECTORY DEFINITIONS ========
@@ -848,509 +849,374 @@ def get_stage_skips(cfg, steps, always_skip=None, special_one_over_f=False):
 # ----------------------------------------
 
 def main():
-    # Set up argument parser for command-line usage
-    parser = argparse.ArgumentParser(
-        description="Coordinate‐descent optimizer for exoTEDRF Stages 1–3"
-    )
-    parser.add_argument(
-        "--config", default="run_optimize.yaml",
-        help="Path to your DMS config YAML"
-    )
-    
+    """
+     optimization workflow:
+    1. Parse config and identify optimizable parameters
+    2. Run optimization on FIRST SEGMENT ONLY
+    3. Run full pipeline on ALL SEGMENTS with optimal parameters
+    """
+    # ===== SETUP =====
+    parser = argparse.ArgumentParser(description="exoTEDRF Optimizer")
+    parser.add_argument("--config", default="run_optimize.yaml", help="Config YAML")
     args = parser.parse_args()
 
-    # Load YAML config file into dictionary
     cfg = parse_config(args.config)
-
-    # Observation mode (Instrument mode used; e.g., 'NIRISS/SOSS', 'NIRSpec/G395H', 'MIRI/LRS'.)
     obs = (cfg.get('observing_mode') or '').lower()
-    # Detector filter (Type of filter or detector used. For SOSS: 'CLEAR'/'F277W'. For NIRSpec: 'NRS1'/'NRS2'.)
-    filter = (cfg.get('filter_detector') or '').lower()
+    filter_det = (cfg.get('filter_detector') or '').lower()
+    instrument = obs.split('/')[0].upper() if '/' in obs else obs.upper()
 
-    # Read key parameters from config (or use defaults)
-    baseline_ints     = cfg.get('baseline_ints', [100, -100])
-    wave_range        = cfg.get('wave_range', None)
-    name_str          = cfg.get('name_tag', 'default_run')
-    wave_range_plot   = cfg.get('wave_range_plot', None)
-    ylim_plot         = cfg.get('ylim_plot', None)
+    # Key parameters
+    baseline_ints = cfg.get('baseline_ints', [100, -100])
+    wave_range = cfg.get('wave_range', None)
+    name_str = cfg.get('name_tag', 'default_run')
+    wave_range_plot = cfg.get('wave_range_plot', None)
+    ylim_plot = cfg.get('ylim_plot', None)
+    w1 = cfg.get('w1', 0.0)
+    w2 = cfg.get('w2', 1.0)
 
-    if 'nrs1' in filter:
-        if wave_range is None:
-            wave_range = (2.9,5.0)
-        if wave_range_plot is None:
-            wave_range_plot = (2.9,5.0)
-
-    elif 'niriss' in obs:
-        if wave_range is None:
+    # Set default wave ranges by instrument
+    if wave_range is None:
+        if 'nrs1' in filter_det:
+            wave_range = (2.9, 5.0)
+        elif 'niriss' in obs:
             wave_range = (0.6, 2.8)
-        if wave_range_plot is None:
-            wave_range_plot = (0.6, 2.8)
-
-    elif 'miri' in obs:
-        if wave_range is None:
+        elif 'miri' in obs:
             wave_range = (5, 12)
-        if wave_range_plot is None:
-            wave_range_plot = (5, 12)
+        else:
+            wave_range = None
 
+    if wave_range_plot is None:
+        wave_range_plot = wave_range
 
-    # Start total runtime timer
     t0_total = time.perf_counter()
 
-    # Load input FITS files from directory
+    # Load input files
     input_files = unpack_input_dir(
         cfg["input_dir"],
         mode=cfg["observing_mode"],
         filetag=cfg["input_filetag"],
         filter_detector=cfg["filter_detector"],
-    ) 
+    )
     if isinstance(input_files, np.ndarray):
         input_files = input_files.tolist()
 
-    # If no files found, try globbing directly for *.fits
-    if not input_files:
-        fancyprint(f"[WARN] No files in {cfg['input_dir']}, globbing *.fits")
-        input_files = sorted(glob.glob(os.path.join(cfg["input_dir"], "*.fits")))
     if not input_files:
         raise RuntimeError(f"No FITS found in {cfg['input_dir']}")
-    fancyprint(f"Using {len(input_files)} segment(s) from {cfg['input_dir']}")
 
-    # ----------------------------------------------------------------
-    # Separate YAML parameters into sweep ranges vs fixed parameters
-    # ----------------------------------------------------------------
-    param_ranges = {}
-    fixed_params = {} 
+    fancyprint(f"Found {len(input_files)} segment(s) from {cfg['input_dir']}")
+    fancyprint(f"=== PHASE 1: OPTIMIZATION ON FIRST SEGMENT ONLY ===")
+
+    # use only first segment for optimization
+    single_segment = [input_files[0]]
+
+    param_ranges = {}  # parametrs to optimize
+    fixed_params = {}  # fixed parameters
+
     for k, v in cfg.items():
         if k.startswith("optimize_"):
-            param_name = k[len("optimize_"):]  # e.g., "soss_inner_mask_width"
-            if v:  # True means: sweep over provided list
+            param_name = k[len("optimize_"):]
+            if v:  # true = optimize (sweep)
                 vals = cfg[param_name]
                 if not isinstance(vals, list):
-                    raise ValueError(f"optimize_{param_name} is True but '{param_name}' is not a list in YAML: {vals}")
+                    raise ValueError(f"{param_name} must be list when optimize_{param_name}=True")
                 param_ranges[param_name] = vals
-            else:  # False means: fix to single provided value
+                fancyprint(f"Will optimize: {param_name} over {vals}")
+            else:  
                 val = cfg[param_name]
                 if isinstance(val, list):
-                    raise ValueError(f"optimize_{param_name} is False but '{param_name}' is a list in YAML: {val}")
+                    raise ValueError(f"{param_name} must be single value when optimize_{param_name}=False")
                 fixed_params[param_name] = val
 
-    # Order of parameters for coordinate descent
-    param_order = list(param_ranges.keys())
-    total_steps = sum(len(v) for v in param_ranges.values())
+    # Initialize with mean values (?) 
+    current_best = {k: int(np.mean(v)) for k, v in param_ranges.items()}
+    current_best.update(fixed_params)
 
-    # Initialize current parameter set to median values of ranges + fixed params
-    current = {k: int(np.median(v)) for k,v in param_ranges.items()}
-    current.update(fixed_params)
+    logf = open(f"{outdir_f}/Cost_{name_str}.txt", "w")
+    logs = open(f"{outdir_f}/Scatter_{name_str}.txt", "w")
+    logf.write("\t".join(param_ranges.keys()) + "\tduration_s\tcost\n")
 
-    # Open logs for cost function values & scatter curves
-    logf = open(f"pipeline_outputs_directory/Files/Cost_{name_str}.txt","w")
-    logs = open(f"pipeline_outputs_directory/Files/Scatter_{name_str}.txt", "w")
-    logf.write("\t".join(param_order)+"\tduration_s\tcost\n")
+    # ===== OPTIMIZATION CHECKPOINTS =====
+    #  the order in which optimizable steps appear in the pipeline
+    # the idea is that we optimize steps sequentially, hitting checkpoints
+    # after which we have optimized all relevant parameters up to that point
 
-    count = 1  # Step counter for progress tracking
-    
-
-    # Constants for pipeline stage configurations 
-    # The idea is that we only have a few steps that are being optimized
-    # so we can just set defining dicts. for non-repetition. 
-    # i.e. starting from optimizing jump 
-    # will go to STAGE1_SKIP_CONFIG['from_linearity']
-    # skipping previous steps and doing the next ones. 
-    STAGE1_SKIP_CONFIG = {
-        'from_darkcurrent': {
-            'always_skip': ['DQInitStep', 'EmiCorrStep', 'SaturationStep', 'ResetStep', 'SuperBiasStep', 'RefPixStep', 'DarkCurrentStep'],
-            'possible_steps': ["darkcurrentstep", "refpixstep", "superbiasstep", 'resetstep', 'saturationstep', 'emicorrstep', 'dqinitstep'],
-            'input_dir': outdir_s1,
+    optimization_checkpoints = [
+        # Stage 1 checkpoints
+        {
+            'name': 'OneOverFStep_grp',
+            'stage': 1,
+            'params': ['soss_inner_mask_width', 'soss_outer_mask_width', 'nirspec_mask_width'],
+            'skip_before': ['DQInitStep', 'EmiCorrStep', 'SaturationStep', 'ResetStep',
+                           'SuperBiasStep', 'RefPixStep', 'DarkCurrentStep'],
+            'skip_after': ['LinearityStep', 'JumpStep', 'RampFitStep', 'GainScaleStep'], # skip after so we dont run into them!
         },
-        'from_linearity': {
-            'always_skip': ['DQInitStep', 'EmiCorrStep', 'SaturationStep', 'ResetStep', 'SuperBiasStep', 'RefPixStep', 'DarkCurrentStep', 'OneOverFStep', 'LinearityStep'],
-            'possible_steps': ['linearitystep', 'oneoverfstep', "darkcurrentstep", "refpixstep", "superbiasstep", 'resetstep', 'saturationstep', 'emicorrstep', 'dqinitstep'],
-            'input_dir': outdir_s1,
+        {
+            'name': 'JumpStep',
+            'stage': 1,
+            'params': ['time_jump_threshold', 'time_window'],
+            'skip_before': ['DQInitStep', 'EmiCorrStep', 'SaturationStep', 'ResetStep',
+                           'SuperBiasStep', 'RefPixStep', 'DarkCurrentStep',
+                           'OneOverFStep_grp', 'LinearityStep'],
+            'skip_after': ['RampFitStep', 'GainScaleStep'],
         },
-    }
-
-    STAGE2_SKIP_CONFIG = {
-        'from_background': {
-            'always_skip': ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep', 'WaveCorrStep', 'FlatFieldStep'],
-            'possible_steps': ['flatfieldstep', 'wavecorrstep', 'sourcetypestep', 'extract2dstep', 'assignwcsstep'],
-            'input_dir': outdir_s2,
-            'fallback_dir': outdir_s1,
-            'fallback_steps': ["gainscalestep", 'rampfitstep', 'jumpstep'],
+        # Stage 2 checkpoints
+        {
+            'name': 'BackgroundStep',
+            'stage': 2,
+            'params': ['miri_trace_width', 'miri_background_width'],
+            'skip_before': ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep',
+                           'WaveCorrStep', 'FlatFieldStep'],
+            'skip_after': ['OneOverFStep_int', 'BadPixStep', 'PCAReconstructStep', 'TracingStep'],
         },
-        'from_badpix': {
-            'always_skip': ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep', 'WaveCorrStep', 'FlatFieldStep', 'BackgroundStep', 'OneOverFStep'],
-            'possible_steps': ['oneoverfstep', 'backgroundstep', 'flatfieldstep', 'wavecorrstep', 'sourcetypestep', 'extract2dstep', 'assignwcsstep'],
-            'input_dir': outdir_s2,
-            'fallback_dir': outdir_s1,
-            'fallback_steps': ["gainscalestep", 'rampfitstep', 'jumpstep'],
+        {
+            'name': 'BadPixStep',
+            'stage': 2,
+            'params': ['space_outlier_threshold', 'time_outlier_threshold', 'box_size', 'window_size'],
+            'skip_before': ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep',
+                           'WaveCorrStep', 'FlatFieldStep', 'BackgroundStep', 'OneOverFStep_int'],
+            'skip_after': ['PCAReconstructStep', 'TracingStep'],
         },
-        'from_tracing': {
-            'always_skip': ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep', 'WaveCorrStep', 'FlatFieldStep', 'BackgroundStep', 'OneOverFStep'],
-            'possible_steps': ['tracingstep', 'pcareconstructstep', 'badpixstep', 'oneoverfstep', 'backgroundstep', 'flatfieldstep', 'wavecorrstep', 'sourcetypestep', 'extract2dstep', 'assignwcsstep'],
-            'input_dir': outdir_s2,
-            'fallback_dir': outdir_s1,
-            'fallback_steps': ["gainscalestep", 'rampfitstep', 'jumpstep'],
+        # Stage 3 checkpoint
+        {
+            'name': 'Extract',
+            'stage': 3,
+            'params': ['extract_width'],
+            'skip_before': [],
+            'skip_after': [],
         },
-    }
+    ]
 
-    # this  maps optimization parameters to the pipeline rerun strategy.
-    # Each entry defines which stages to run, what steps to skip, and where to
-    # find input files,  replacing the previous if/elif structure.
-    PARAM_RUN_CONFIG = {
-        'default': {
-            'run_stages': [1, 2, 3],
-            'stage1': {'always_skip': [], 'input_type': 'initial'},
-            'stage2': {'always_skip': []},
-            'stage3': {'always_skip': []},
-        },
-        ('nirspec_mask_width', 'soss_inner_mask_width', 'soss_outer_mask_width'): {
-            'run_stages': [1, 2, 3],
-            'stage1': {**STAGE1_SKIP_CONFIG['from_darkcurrent'], 'input_type': 'intermediate'},
-            'stage2': {'always_skip': []},
-            'stage3': {'always_skip': []},
-        },
-        ('time_jump_threshold', 'jump_threshold', 'time_rejection_threshold', 'time_window'): {
-            'run_stages': [1, 2, 3],
-            'stage1': {**STAGE1_SKIP_CONFIG['from_linearity'], 'input_type': 'intermediate'},
-            'stage2': {'always_skip': []},
-            'stage3': {'always_skip': []},
-        },
-        ('miri_trace_width', 'miri_background_width'): {
-            'run_stages': [2, 3],
-            'stage2': {**STAGE2_SKIP_CONFIG['from_background'], 'input_type': 'intermediate'},
-            'stage3': {'always_skip': []},
-        },
-        ('space_outlier_threshold', 'space_thresh', 'time_outlier_threshold', 'time_thresh', 'box_size', 'window_size'): {
-            'run_stages': [2, 3],
-            'stage2': {**STAGE2_SKIP_CONFIG['from_badpix'], 'input_type': 'intermediate'},
-            'stage3': {'always_skip': []},
-        },
-        ('extract_width',): {
-            'run_stages': [2, 3],
-            'stage2': {**STAGE2_SKIP_CONFIG['from_tracing'], 'input_type': 'intermediate'},
-            'stage3': {'always_skip': []},
-        },
-    }
-    # flatten the config for easy lookup. Now each parameter maps directly to its run config.
-    param_map = {}
-    for keys, config in PARAM_RUN_CONFIG.items():
-        if isinstance(keys, tuple):
-            for key in keys:
-                param_map[key] = config
-        else:
-            param_map[keys] = config
+    # Cache for centroids (generated once, reused)
+    centroids = None
 
-    def run_pipeline_stages(run_cfg, param_key, s1_args, s2_args, s3_args):
-        """
-        runs pipeline stages based on the parameter being optimized.
-        """
-        config = param_map.get(param_key, param_map.get('default'))
-        run_stages = config['run_stages']
+    # ~~~ OPTIMIZE EACH CHECKPOINT ~~~
+    for checkpoint in optimization_checkpoints:
+        # check if any params at this checkpoint need optimization
+        params_to_optimize = [p for p in checkpoint['params'] if p in param_ranges]
 
-        stage1_results, stage2_results, stage3_results = None, None, None
-        centroids = run_cfg.get('centroids')
+        if not params_to_optimize:
+            fancyprint(f"Skipping {checkpoint['name']}: no parameters to optimize")
+            continue
 
-        first_stage = run_stages[0]
-        stage_config = config.get(f'stage{first_stage}', {})
-        
-        if stage_config.get('input_type') == 'intermediate':
-            files = make_step_filenames(
-                input_files,
-                output_dir=stage_config['input_dir'],
-                possible_steps=stage_config['possible_steps'],
-                output_dir_2nd=stage_config.get('fallback_dir'),
-                possible_steps_2nd=stage_config.get('fallback_steps')
-            )
-        else:
-            files = input_files
+        fancyprint(f"\n{'='*60}")
+        fancyprint(f"OPTIMIZING AT: {checkpoint['name']} (Stage {checkpoint['stage']})")
+        fancyprint(f"Parameters: {params_to_optimize}")
+        fancyprint(f"{'='*60}\n")
 
-        #  run pipeline stages
-        if 1 in run_stages:
-            s1_conf = config.get('stage1', {})
-            stage1_skip = get_stage_skips(run_cfg, stage1_steps, always_skip=s1_conf.get('always_skip', []), special_one_over_f=True)
-            stage1_results = run_stage1(
-                files, mode=run_cfg['observing_mode'], soss_background_model=run_cfg['soss_background_file'],
-                baseline_ints=run_cfg['baseline_ints'], oof_method=run_cfg['oof_method'],
-                superbias_method=run_cfg['superbias_method'], soss_timeseries=run_cfg['soss_timeseries'],
-                soss_timeseries_o2=run_cfg['soss_timeseries_o2'], save_results=True, pixel_masks=run_cfg['outlier_maps'],
-                force_redo=True, flag_up_ramp=run_cfg['flag_up_ramp'], rejection_threshold=run_cfg['jump_threshold'],
-                flag_in_time=run_cfg['flag_in_time'], time_rejection_threshold=run_cfg['time_jump_threshold'],
-                output_tag=run_cfg['output_tag'], skip_steps=stage1_skip, do_plot=run_cfg.get('do_plots', False),
-                soss_inner_mask_width=run_cfg.get('soss_inner_mask_width'), soss_outer_mask_width=run_cfg.get('soss_outer_mask_width'),
-                nirspec_mask_width=run_cfg.get('nirspec_mask_width'), centroids=run_cfg.get('centroids'),
-                hot_pixel_map=run_cfg.get('hot_pixel_map'), miri_drop_groups=run_cfg.get('miri_drop_groups'),
-                **run_cfg.get('stage1_kwargs', {}), **s1_args
-            )
-            files = stage1_results
-            
-        if 2 in run_stages:
-            s2_conf = config.get('stage2', {})
-            stage2_skip = get_stage_skips(run_cfg, stage2_steps, always_skip=s2_conf.get('always_skip', []))
-            stage2_results, centroids = run_stage2(
-                files, mode=run_cfg['observing_mode'], soss_background_model=run_cfg['soss_background_file'],
-                baseline_ints=run_cfg['baseline_ints'], save_results=True, force_redo=True,
-                space_thresh=run_cfg.get('space_outlier_threshold'), time_thresh=run_cfg.get('time_outlier_threshold'),
-                remove_components=run_cfg.get('remove_components'), pca_components=run_cfg.get('pca_components'),
-                soss_timeseries=run_cfg.get('soss_timeseries'), soss_timeseries_o2=run_cfg.get('soss_timeseries_o2'),
-                oof_method=run_cfg.get('oof_method'), output_tag=run_cfg['output_tag'],
-                smoothing_scale=run_cfg.get('smoothing_scale'), skip_steps=stage2_skip, generate_lc=run_cfg.get('generate_lc'),
-                soss_inner_mask_width=run_cfg.get('soss_inner_mask_width'), soss_outer_mask_width=run_cfg.get('soss_outer_mask_width'),
-                nirspec_mask_width=run_cfg.get('nirspec_mask_width'), pixel_masks=run_cfg.get('outlier_maps'),
-                generate_order0_mask=run_cfg.get('generate_order0_mask'), f277w=run_cfg.get('f277w'),
-                do_plot=run_cfg.get('do_plots', False), centroids=centroids, miri_trace_width=run_cfg.get('miri_trace_width'),
-                miri_background_width=run_cfg.get('miri_background_width'), miri_background_method=run_cfg.get('miri_background_method'),
-                **run_cfg.get('stage2_kwargs', {}), **s2_args
-            )
-            if isinstance(centroids, np.ndarray):
-                centroids = pd.DataFrame(centroids.T, columns=["xpos", "ypos"])
-            files = stage2_results
+        # for each parameter at this checkpoint
+        for param_name in params_to_optimize:
+            param_values = param_ranges[param_name]
+            fancyprint(f"\n--- Sweeping {param_name}: {param_values} ---")
 
-        if 3 in run_stages:
-            s3_conf = config.get('stage3', {})
-            stage3_skip = get_stage_skips(run_cfg, stage3_steps, always_skip=s3_conf.get('always_skip', []))
-            this_centroid = run_cfg['centroids'] if run_cfg['centroids'] is not None else centroids
-            stage3_results = run_stage3(
-                files, save_results=True, force_redo=True, extract_method=run_cfg['extract_method'],
-                soss_specprofile=run_cfg.get('soss_specprofile'), centroids=this_centroid,
-                extract_width=run_cfg.get('extract_width'), st_teff=run_cfg.get('st_teff'),
-                st_logg=run_cfg.get('st_logg'), st_met=run_cfg.get('st_met'),
-                planet_letter=run_cfg.get('planet_letter'), output_tag=run_cfg['output_tag'],
-                do_plot=run_cfg.get('do_plots', False), skip_steps=stage3_skip,
-                **run_cfg.get('stage3_kwargs', {}), **s3_args
-            )
-            
-        return stage2_results, stage3_results
+            costs = []
+            scatters = []
 
-    for key in param_order:
-        fancyprint(
-            f"Optimizing {key} "
-            f"(fixed-other={{{', '.join(f'{k}:{current[k]}' for k in current if k!=key)}}})"
-        )
-        best_val  = current[key]
-        best_cost = None
+            # sweep through parameter values
+            for param_value in param_values:
+                t0 = time.perf_counter()
 
-        for trial in param_ranges[key]:
-            # Report trial info
-            fancyprint(f"Iteration {count}/{total_steps}: {key}={trial}")
-            trial_params = {**current, key: trial}
-            run_cfg = cfg.copy()
-            run_cfg.update(trial_params)
+                # updaete config with current parameter
+                run_cfg = cfg.copy()
+                run_cfg.update(current_best)  # use best values from previous optimizations
+                run_cfg[param_name] = param_value  # Current  value
 
-            t0 = time.perf_counter()
+                fancyprint(f"\nTesting {param_name}={param_value}")
 
-            print(
-                "\n############################################",
-                f"\n Iteration: {count}/{total_steps} starting {key}={trial}",
-                "\n############################################\n",
-                flush=True
-            )            
+                # run pipeline up to (including this step)
+                if checkpoint['stage'] == 1:
+                    # Build skip list: skip everything after this step
+                    skip_list = checkpoint['skip_after'].copy()
 
-            # ----------------------------------------------------------------
-            # Split args into per-stage overrides (e.g., JumpStep, BadPixStep)
-            # ----------------------------------------------------------------
-            s1_args, s2_args, s3_args = {}, {}, {}
-            if "time_window" in trial_params:
-                s1_args["JumpStep"] = {"time_window":trial_params["time_window"]}
-            badpix = {}
-            if "box_size" in trial_params:
-                badpix["box_size"] = trial_params["box_size"]
-            if "window_size" in trial_params:
-                badpix["window_size"] = trial_params["window_size"]
-            if badpix:
-                s2_args["BadPixStep"] = badpix
+                    # Run Stage 1 with force_redo to rerun the optimized step
+                    stage1_results = run_stage1(
+                        single_segment,
+                        mode=cfg['observing_mode'],
+                        baseline_ints=baseline_ints,
+                        save_results=True,
+                        force_redo=True,
+                        output_tag=cfg['output_tag'],
+                        skip_steps=skip_list,
+                        # Pass all relevant parameters
+                        soss_inner_mask_width=run_cfg.get('soss_inner_mask_width'),
+                        soss_outer_mask_width=run_cfg.get('soss_outer_mask_width'),
+                        nirspec_mask_width=run_cfg.get('nirspec_mask_width'),
+                        time_rejection_threshold=run_cfg.get('time_jump_threshold'),
+                        jump_threshold=run_cfg.get('jump_threshold', 15),
+                        flag_in_time=cfg.get('flag_in_time', True),
+                        flag_up_ramp=cfg.get('flag_up_ramp', False),
+                        **cfg.get('stage1_kwargs', {})
+                    )
 
-            # Define full list of steps for each stage
-            stage1_steps = [
-                'DQInitStep','EmiCorrStep','SaturationStep','ResetStep','SuperBiasStep',
-                'RefPixStep','DarkCurrentStep','OneOverFStep_grp','LinearityStep',
-                'JumpStep','RampFitStep','GainScaleStep'
-            ]
-            stage2_steps = [
-                'AssignWCSStep','Extract2DStep','SourceTypeStep','WaveCorrStep',
-                'FlatFieldStep','BackgroundStep','OneOverFStep_int',
-                'BadPixStep','PCAReconstructStep','TracingStep'
-            ]
-            stage3_steps = []
+                    # Extract from Stage 1 output
+                    datafile = stage1_results[0]
 
-            param_key = key if best_cost is not None else None
-            stage2_results, stage3_results = run_pipeline_stages(
-                run_cfg, param_key, s1_args, s2_args, s3_args
-            )
+                elif checkpoint['stage'] == 2:
+                    # First, need Stage 1 results
+                    stage1_results = run_stage1(
+                        single_segment,
+                        mode=cfg['observing_mode'],
+                        baseline_ints=baseline_ints,
+                        save_results=True,
+                        force_redo=False,  # Use cached
+                        output_tag=cfg['output_tag'],
+                        **cfg.get('stage1_kwargs', {})
+                    )
 
-            # ----------------------------------------------------------------
-            # Run cost function & log results
-            # ----------------------------------------------------------------
-            st2, st3 = stage2_results, stage3_results
-            cost, scatter = cost_function(st3, w1=w1, w2=w2,
-                                          baseline_ints=baseline_ints,
-                                          wave_range=wave_range)
-            dt = time.perf_counter() - t0
-            fancyprint(f"cost = {cost:.12f} in {dt:.1f}s")
+                    # Build skip list for Stage 2
+                    skip_list = checkpoint['skip_after'].copy()
 
-            logf.write(
-                "\t".join(str(trial_params[k]) for k in param_order)
-                + f"\t{dt:.1f}\t{cost:.12f}\n"
-            )
-            line = " ".join(f"{x:.10g}" for x in scatter)
-            logs.write(line + "\n")
+                    # Run Stage 2
+                    stage2_results, _ = run_stage2(
+                        stage1_results,
+                        mode=cfg['observing_mode'],
+                        baseline_ints=baseline_ints,
+                        save_results=True,
+                        force_redo=True,
+                        output_tag=cfg['output_tag'],
+                        skip_steps=skip_list,
+                        space_thresh=run_cfg.get('space_outlier_threshold'),
+                        time_thresh=run_cfg.get('time_outlier_threshold'),
+                        miri_trace_width=run_cfg.get('miri_trace_width'),
+                        miri_background_width=run_cfg.get('miri_background_width'),
+                        **cfg.get('stage2_kwargs', {})
+                    )
 
-            # Update best if cost improved
-            if best_cost is None or cost < best_cost:
-                best_cost, best_val = cost, trial
-                diagnostic_plot(st3, name_str,
-                                baseline_ints=baseline_ints,
-                                outdir=outdir_f)
+                    datafile = stage2_results[0]
 
-            print(
-                "\n############################################",
-                f"\n Iteration: {count}/{total_steps} completed (dt={dt:.1f}s)",
-                "\n############################################\n",
-                flush=True
-            )     
- 
-            count += 1
+                elif checkpoint['stage'] == 3:
+                    # Need Stage 1 and 2 completed first
+                    stage1_results = run_stage1(
+                        single_segment,
+                        mode=cfg['observing_mode'],
+                        baseline_ints=baseline_ints,
+                        save_results=True,
+                        force_redo=False,
+                        output_tag=cfg['output_tag'],
+                        **cfg.get('stage1_kwargs', {})
+                    )
 
-        # Commit best value for this parameter before moving on
-        current[key] = best_val
-        fancyprint(f"Best {key} = {best_val} (cost={best_cost:.12f})")
+                    stage2_results, _ = run_stage2(
+                        stage1_results,
+                        mode=cfg['observing_mode'],
+                        baseline_ints=baseline_ints,
+                        save_results=True,
+                        force_redo=False,
+                        output_tag=cfg['output_tag'],
+                        **cfg.get('stage2_kwargs', {})
+                    )
 
-    # ------------------------------------------------------
-    # final reporting & fast validation run
-    # ------------------------------------------------------
+                    datafile = stage2_results[0]
 
-    # Compute total runtime and print it in h:mm:ss format
-    t1 = time.perf_counter() - t0_total
-    h, m = divmod(int(t1), 3600)
-    m, s = divmod(m, 60)
-    fancyprint(f"TOTAL runtime: {h}h {m:02d}min {s:04.1f}s")
+                # Extract and compute cost <- new function 
+                spectral_dict, centroids = extract_at_step(
+                    datafile=datafile,
+                    instrument=instrument,
+                    extract_width=run_cfg.get('extract_width', 20),
+                    centroids=centroids,  # Reuse cached
+                    baseline_ints=baseline_ints,
+                    output_dir=outdir_s2
+                )
 
-    # Close log files
+                # Compute cost
+                cost, scatter = cost_function(
+                    spectral_dict,
+                    baseline_ints=baseline_ints,
+                    wave_range=wave_range,
+                    w1=w1,
+                    w2=w2
+                )
+
+                dt = time.perf_counter() - t0
+                costs.append(cost)
+                scatters.append(scatter)
+
+                fancyprint(f"{param_name}={param_value}: cost={cost:.6f} ({dt:.1f}s)")
+
+                # Log results
+                log_line = "\t".join(str(run_cfg.get(p, '')) for p in param_ranges.keys())
+                logf.write(f"{log_line}\t{dt:.1f}\t{cost:.12f}\n")
+                logf.flush()
+
+                scatter_line = " ".join(f"{x:.10g}" for x in scatter)
+                logs.write(f"{scatter_line}\n")
+                logs.flush()
+
+            # Find best value for this parameter
+            best_idx = np.argmin(costs)
+            best_value = param_values[best_idx]
+            best_cost = costs[best_idx]
+
+            current_best[param_name] = best_value
+            fancyprint(f"\n*** Best {param_name}={best_value} with cost={best_cost:.6f} ***\n")
+
     logf.close()
     logs.close()
 
-    # Print final set of optimized parameters from coordinate descent
-    fancyprint("=== FINAL OPTIMUM ===")
-    fancyprint(current)
-
-    # Plot cost vs. parameter sweep history
+ 
+    fancyprint("\n=== Plotting optimization results ===")
     plot_cost(name_str)
 
-    # Identify global best row from cost table
-    cost_file = os.path.join(outdir_f, f"Cost_{name_str}.txt")
-    df_cost   = pd.read_csv(cost_file, sep="\t")
-    idx_min   = df_cost['cost'].idxmin()       # index of lowest cost
-    best_row  = df_cost.loc[idx_min]           # the row with the best cost
+    # ===== PHASE 2: FULL PIPELINE WITH OPTIMAL PARAMETERS =====
+    fancyprint(f"\n{'='*60}")
+    fancyprint("PHASE 2: FULL PIPELINE WITH OPTIMAL PARAMETERS")
+    fancyprint(f"Using ALL {len(input_files)} segments")
+    fancyprint(f"Optimal parameters: {current_best}")
+    fancyprint(f"{'='*60}\n")
 
-    # Extract only the parameters that were swept (convert floats to int if they’re whole numbers)
-    best_params = {
-        col: int(best_row[col]) if float(best_row[col]).is_integer() else best_row[col]
-        for col in param_order
-    }
-    fancyprint(f"Global best from cost table (row {idx_min}): {best_params}")
-
-    # Merge best swept params with fixed params
-    full_best = fixed_params.copy()
-    full_best.update(best_params)
-
-    # Make a new config containing the optimized parameter set
+    #  set up config of full pipeline with optimal parameters
     final_cfg = cfg.copy()
-    final_cfg.update(full_best)
+    final_cfg.update(current_best)
 
-    # --------------------------------------------------------------------
-    # Fast final validation: only Stage 2 + Stage 3 on precomputed Stage 1
-    # --------------------------------------------------------------------
-    fancyprint("Running fast final validation: only Stage 2 + Stage 3…")
-
-    # Stage 2 will use Stage-1 results already saved to disk
-    stage2_skip = []
- 
-    # Define which Stage-2 steps to look for in filenames
-    possible_steps_int6 = [
-        'tracingstep','pcareconstructstep','badpixstep','oneoverfstep',
-        'backgroundstep','flatfieldstep','wavecorrstep','sourcetypestep',
-        'extract2dstep','assignwcsstep'
-    ]
-
-    # Find Stage-2 input files (fall back to Stage-1 outputs if needed)
-    filenames_int6 = make_step_filenames(
+    # Stage 1
+    stage1_results = run_stage1(
         input_files,
-        output_dir=outdir_s2,       # primary search location (Stage 2 outputs)
-        possible_steps=possible_steps_int6,
-        output_dir_2nd=outdir_s1,   # fallback location (Stage 1 outputs)
-        possible_steps_2nd=["gainscalestep", 'rampfitstep', 'jumpstep']
-    )
-
-    # Run Stage 2 on precomputed Stage 1 outputs using final best parameters
-    stage2_results, centroids = run_stage2(
-        filenames_int6,
-        mode=final_cfg['observing_mode'],
-        soss_background_model=final_cfg['soss_background_file'],
-        baseline_ints=final_cfg['baseline_ints'],
-        save_results=True,
-        force_redo=True,  
-        space_thresh=final_cfg['space_outlier_threshold'],
-        time_thresh=final_cfg['time_outlier_threshold'],
-        remove_components=final_cfg['remove_components'],
-        pca_components=final_cfg['pca_components'],
-        soss_timeseries=final_cfg['soss_timeseries'],
-        soss_timeseries_o2=final_cfg['soss_timeseries_o2'],
-        oof_method=final_cfg['oof_method'],
-        output_tag=final_cfg['output_tag'],
-        smoothing_scale=final_cfg['smoothing_scale'],
-        skip_steps=stage2_skip,
-        generate_lc=final_cfg['generate_lc'],
-        soss_inner_mask_width=final_cfg['soss_inner_mask_width'],
-        soss_outer_mask_width=final_cfg['soss_outer_mask_width'],
-        nirspec_mask_width=final_cfg['nirspec_mask_width'],
-        pixel_masks=final_cfg['outlier_maps'],
-        generate_order0_mask=final_cfg['generate_order0_mask'],
-        f277w=final_cfg['f277w'],
-        do_plot=run_cfg['do_plots'],
-        centroids=final_cfg['centroids'],
-        miri_trace_width=final_cfg['miri_trace_width'],
-        miri_background_width=final_cfg['miri_background_width'],
-        miri_background_method=final_cfg['miri_background_method'],
-        **final_cfg.get('stage2_kwargs', {})
-    )
-
-    # Convert centroids to DataFrame if returned as numpy array
-    if isinstance(centroids, np.ndarray):
-        centroids = pd.DataFrame(centroids.T, columns=["xpos","ypos"])
-
-    # Use config-provided centroids if available; otherwise, use output from Stage 2
-    final_centroids = final_cfg['centroids'] if final_cfg['centroids'] is not None else centroids
-    print(final_centroids)
-
-    # Run Stage 3 with best extraction width and other Stage 3 parameters
-    stage3_results = run_stage3(
-        stage2_results, 
+        mode=cfg['observing_mode'],
+        baseline_ints=baseline_ints,
         save_results=True,
         force_redo=True,
-        extract_method=final_cfg['extract_method'],
-        soss_specprofile=final_cfg['soss_specprofile'],
-        centroids=final_centroids,
-        extract_width=final_cfg['extract_width'],
-        st_teff=final_cfg['st_teff'],
-        st_logg=final_cfg['st_logg'],
-        st_met=final_cfg['st_met'],
-        planet_letter=final_cfg['planet_letter'],
-        output_tag=final_cfg['output_tag'],
-        do_plot=run_cfg['do_plots'],
-        skip_steps=[], 
-        **final_cfg.get('stage3_kwargs', {})
+        output_tag=cfg['output_tag'],
+        soss_inner_mask_width=final_cfg.get('soss_inner_mask_width'),
+        soss_outer_mask_width=final_cfg.get('soss_outer_mask_width'),
+        nirspec_mask_width=final_cfg.get('nirspec_mask_width'),
+        time_rejection_threshold=final_cfg.get('time_jump_threshold'),
+        **cfg.get('stage1_kwargs', {})
     )
 
-    # Generate diagnostic plots for the final Stage 3 output
-    diagnostic_plot(stage3_results, name_str, baseline_ints=baseline_ints, outdir=outdir_f)
-    fancyprint("Final validation complete.")
+    # Stage 2
+    stage2_results, final_centroids = run_stage2(
+        stage1_results,
+        mode=cfg['observing_mode'],
+        baseline_ints=baseline_ints,
+        save_results=True,
+        force_redo=True,
+        output_tag=cfg['output_tag'],
+        space_thresh=final_cfg.get('space_outlier_threshold'),
+        time_thresh=final_cfg.get('time_outlier_threshold'),
+        miri_trace_width=final_cfg.get('miri_trace_width'),
+        miri_background_width=final_cfg.get('miri_background_width'),
+        **cfg.get('stage2_kwargs', {})
+    )
 
-    # ------------------------------------------------------
-    # Visualize best scatter curve & photon noise floor
-    # ------------------------------------------------------
-    outfile  = os.path.join(outdir_f, f"Scatter_{name_str}.txt")
+    # Stage 3
+    stage3_results = run_stage3(
+        stage2_results,
+        save_results=True,
+        force_redo=True,
+        extract_method=cfg['extract_method'],
+        extract_width=final_cfg.get('extract_width'),
+        centroids=cfg.get('centroids') or final_centroids,
+        output_tag=cfg['output_tag'],
+        **cfg.get('stage3_kwargs', {})
+    )
+
+    #  diagnostics
+    diagnostic_plot(stage3_results, name_str, baseline_ints=baseline_ints, outdir=outdir_f)
+
+    #  scatter plot
+    outfile = os.path.join(outdir_f, f"Scatter_{name_str}.txt")
     specfile = glob.glob(os.path.join(outdir_s3, "*_box_spectra_fullres.fits"))[0]
     best_idx = pd.read_csv(os.path.join(outdir_f, f"Cost_{name_str}.txt"), sep="\t")['cost'].idxmin()
 
-    # Plot best-scatter spectrum with smoothing applied
     plot_scatter(
         txtfile=outfile,
         rows=[best_idx],
@@ -1361,6 +1227,17 @@ def main():
         style="line",
         save_path=os.path.join(outdir_f, f"Scatter_Plot_{name_str}.png"),
     )
+
+    #  timing
+    t1 = time.perf_counter() - t0_total
+    h, m = divmod(int(t1), 3600)
+    m, s = divmod(m, 60)
+    fancyprint(f"\n{'='*60}")
+    fancyprint(f"TOTAL RUNTIME: {h}h {m:02d}min {s:02d}s")
+    fancyprint(f"OPTIMAL PARAMETERS: {current_best}")
+    fancyprint(f"{'='*60}\n")
+
+
 
 if __name__ == "__main__":
     main() 
