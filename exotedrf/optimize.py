@@ -1020,6 +1020,28 @@ def main():
 
                 fancyprint(f"\nTesting {param_name}={param_value}")
 
+                # Delete cached output for the optimization step to force rerun from that step onward
+                if not debug_mode:
+                    step_output_pattern = None
+                    if checkpoint['name'] == 'OneOverFStep_grp':
+                        step_output_pattern = f"{outdir_s1}*_OneOverFStep_grp.fits"
+                    elif checkpoint['name'] == 'JumpStep':
+                        step_output_pattern = f"{outdir_s1}*_jump.fits"
+                    elif checkpoint['name'] == 'BackgroundStep':
+                        step_output_pattern = f"{outdir_s2}*_BackgroundStep.fits"
+                    elif checkpoint['name'] == 'BadPixStep':
+                        step_output_pattern = f"{outdir_s2}*_BadPixStep.fits"
+
+                    if step_output_pattern:
+                        files_to_delete = glob.glob(step_output_pattern)
+                        if files_to_delete:
+                            fancyprint(f"Deleting {len(files_to_delete)} cached file(s) for {checkpoint['name']}:")
+                            for cached_file in files_to_delete:
+                                fancyprint(f"  - {cached_file}")
+                                os.remove(cached_file)
+                        else:
+                            fancyprint(f"No cached files found matching: {step_output_pattern}")
+
                 # run pipeline up to (including this step)
                 if checkpoint['stage'] == 1:
                     # Build skip list: skip everything after this step
@@ -1032,7 +1054,7 @@ def main():
                             s1_kwargs['JumpStep'] = {}
                         s1_kwargs['JumpStep']['time_window'] = param_value
 
-                    # Run Stage 1 
+                    # Run Stage 1 with force_redo=False (deleted file will trigger rerun from that step)
                     stage1_results = run_stage1(
                         single_segment,
                         mode=run_cfg['observing_mode'],
@@ -1044,7 +1066,7 @@ def main():
                         soss_timeseries_o2=run_cfg.get('soss_timeseries_o2'),
                         save_results=True,
                         pixel_masks=run_cfg.get('outlier_maps'),
-                        force_redo=True,
+                        force_redo=False if not debug_mode else False,
                         flag_up_ramp=run_cfg.get('flag_up_ramp', False),
                         rejection_threshold=run_cfg.get('jump_threshold', 15),
                         flag_in_time=run_cfg.get('flag_in_time', True),
@@ -1207,7 +1229,7 @@ def main():
 
                     datafile = stage2_results[0]
 
-                # Extract and compute cost <- new function 
+                # Extract and compute cost <- new function
                 spectral_dict, centroids = extract_at_step(
                     datafile=datafile,
                     instrument=instrument,
@@ -1226,11 +1248,16 @@ def main():
                     w2=w2
                 )
 
+                # Debug cost details
+                fancyprint(f"  Cost function: w1={w1}, w2={w2}, wave_range={wave_range}")
+                fancyprint(f"  Scatter: min={np.nanmin(scatter):.6e}, max={np.nanmax(scatter):.6e}, median={np.nanmedian(scatter):.6e}")
+                fancyprint(f"  Valid scatter values: {np.sum(np.isfinite(scatter))}/{len(scatter)}")
+
                 dt = time.perf_counter() - t0
                 costs.append(cost)
                 scatters.append(scatter)
 
-                fancyprint(f"{param_name}={param_value}: cost={cost:.6f} ({dt:.1f}s)")
+                fancyprint(f"{param_name}={param_value}: cost={cost:.12f} ({dt:.1f}s)")
 
                 # Log results
                 log_line = "\t".join(str(run_cfg.get(p, '')) for p in param_ranges.keys())
@@ -1379,4 +1406,3 @@ def main():
 
 if __name__ == "__main__":
     main() 
-
