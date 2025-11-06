@@ -1272,10 +1272,14 @@ def main():
                 )
 
                 # Compute cost
+                # For Phase 1, skip wave_range filtering (use all channels for relative comparison)
+                # Accurate wavelengths not available from Stage 1 files
+                phase1_wave_range = None if checkpoint['stage'] == 1 else wave_range
+
                 cost, scatter = cost_function(
                     spectral_dict,
                     baseline_ints=baseline_ints,
-                    wave_range=wave_range,
+                    wave_range=phase1_wave_range,
                     w1=w1,
                     w2=w2
                 )
