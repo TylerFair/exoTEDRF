@@ -867,6 +867,10 @@ def main():
     ylim_plot = cfg.get('ylim_plot', None)
     w1 = cfg.get('w1', 0.0)
     w2 = cfg.get('w2', 1.0)
+    debug_mode = cfg.get('debug_mode', False)
+
+    if debug_mode:
+        fancyprint("DEBUG MODE ENABLED: Will use cached results (force_redo=False) for all stages", msg_type='WARNING')
 
     # Set default wave ranges by instrument
     if wave_range is None:
@@ -1021,12 +1025,25 @@ def main():
                     # Build skip list: skip everything after this step
                     skip_list = checkpoint['skip_after'].copy()
 
-                    # Build JumpStep kwargs if needed
+                    # Build step-specific kwargs and force only the optimization step to redo
                     s1_args = {}
-                    if param_name == 'time_window':
-                        s1_args['JumpStep'] = {'time_window': param_value}
 
-                    # Run Stage 1 with force_redo to rerun the optimized step
+                    # Determine which step is being optimized and force it to redo (unless debug_mode)
+                    if checkpoint['name'] == 'OneOverFStep_grp':
+                        # Force OneOverFStep to redo
+                        if not debug_mode:
+                            s1_args['OneOverFStep_grp'] = {'force_redo': True}
+                    elif checkpoint['name'] == 'JumpStep':
+                        # Force JumpStep to redo, and pass time_window if optimizing it
+                        jump_kwargs = {}
+                        if not debug_mode:
+                            jump_kwargs['force_redo'] = True
+                        if param_name == 'time_window':
+                            jump_kwargs['time_window'] = param_value
+                        if jump_kwargs:
+                            s1_args['JumpStep'] = jump_kwargs
+
+                    # Run Stage 1 with stage-level force_redo=False, but step-level force_redo=True
                     stage1_results = run_stage1(
                         single_segment,
                         mode=run_cfg['observing_mode'],
@@ -1038,7 +1055,7 @@ def main():
                         soss_timeseries_o2=run_cfg.get('soss_timeseries_o2'),
                         save_results=True,
                         pixel_masks=run_cfg.get('outlier_maps'),
-                        force_redo=True,
+                        force_redo=False,  # Stage-level: use cached outputs
                         flag_up_ramp=run_cfg.get('flag_up_ramp', False),
                         rejection_threshold=run_cfg.get('jump_threshold', 15),
                         flag_in_time=run_cfg.get('flag_in_time', True),
@@ -1091,24 +1108,34 @@ def main():
                     # Build skip list for Stage 2
                     skip_list = checkpoint['skip_after'].copy()
 
-                    # Build BadPixStep kwargs if needed
+                    # Build step-specific kwargs and force only the optimization step to redo
                     s2_args = {}
-                    badpix_kwargs = {}
-                    if param_name == 'box_size':
-                        badpix_kwargs['box_size'] = param_value
-                    if param_name == 'window_size':
-                        badpix_kwargs['window_size'] = param_value
-                    if badpix_kwargs:
-                        s2_args['BadPixStep'] = badpix_kwargs
 
-                    # Run Stage 2
+                    # Determine which step is being optimized and force it to redo (unless debug_mode)
+                    if checkpoint['name'] == 'BackgroundStep':
+                        # Force BackgroundStep to redo
+                        if not debug_mode:
+                            s2_args['BackgroundStep'] = {'force_redo': True}
+                    elif checkpoint['name'] == 'BadPixStep':
+                        # Force BadPixStep to redo, and pass parameters if optimizing them
+                        badpix_kwargs = {}
+                        if not debug_mode:
+                            badpix_kwargs['force_redo'] = True
+                        if param_name == 'box_size':
+                            badpix_kwargs['box_size'] = param_value
+                        if param_name == 'window_size':
+                            badpix_kwargs['window_size'] = param_value
+                        if badpix_kwargs:
+                            s2_args['BadPixStep'] = badpix_kwargs
+
+                    # Run Stage 2 with stage-level force_redo=False, but step-level force_redo=True
                     stage2_results, stage2_centroids = run_stage2(
                         stage1_results,
                         mode=run_cfg['observing_mode'],
                         soss_background_model=run_cfg.get('soss_background_file'),
                         baseline_ints=run_cfg['baseline_ints'],
                         save_results=True,
-                        force_redo=True,
+                        force_redo=False,  # Stage-level: use cached outputs
                         space_thresh=run_cfg.get('space_outlier_threshold'),
                         time_thresh=run_cfg.get('time_outlier_threshold'),
                         remove_components=run_cfg.get('remove_components'),
@@ -1371,6 +1398,8 @@ def main():
     fancyprint(f"TOTAL RUNTIME: {h}h {m:02d}min {s:02d}s")
     fancyprint(f"OPTIMAL PARAMETERS: {current_best}")
     fancyprint(f"{'='*60}\n")
+
+
 
 
 
