@@ -36,55 +36,75 @@ def apply_dq_flags(datafiles):
 
     # get flux, errors, and DQ (from badpixstep)
     for i, file in enumerate(datafiles):
+        fancyprint(f'Loading segment {i}: {file if isinstance(file, str) else "datamodel"}')
+
         if isinstance(file, str):
             data = fits.getdata(file, 1)
-            err = fits.getdata(file, 2)  
-            dq = fits.getdata(file, 3) 
+            err = fits.getdata(file, 2)
+            dq = fits.getdata(file, 3)
+            fancyprint(f'  Loaded from FITS: data.shape={data.shape}, err.shape={err.shape}, dq.shape={dq.shape}')
         else:
             with utils.open_filetype(file) as datamodel:
                 data = datamodel.data
                 err = datamodel.err
                 dq = datamodel.dq
+                fancyprint(f'  Loaded from datamodel: data.shape={data.shape}, err.shape={err.shape}, dq.shape={dq.shape if dq is not None else None}')
 
         if dq is not None:
-            # for 4D data (pre-rampfit), take last group (??)
+            # for 4D data (pre-rampfit), take last group
             is_4d = data.ndim == 4
+            fancyprint(f'  is_4d={is_4d}, data.ndim={data.ndim}')
 
             if is_4d:
-                # data shape: (nint, ngroup, y, x) 
-                # dq shape: (nint, ngroup, y, x) or (x, y, ngroup, nint) (??) PIXEL & GROUP DQ are different, so need to check
-                if dq.ndim == 4 and dq.shape[-1] != data.shape[0]:
-                    # transpose from (x, y, ngroup, nint) to (nint, ngroup, y, x) for consistency
+                # data shape: (nint, ngroup, y, x)
+                # dq shape: (nint, ngroup, y, x) or (x, y, ngroup, nint) - need to check
+                fancyprint(f'  4D processing: dq.shape={dq.shape}, data.shape={data.shape}')
+
+                if dq.ndim == 4 and dq.shape[0] != data.shape[0]:
+                    fancyprint(f'  Transposing DQ from {dq.shape} to match data')
                     dq = np.transpose(dq, (3, 2, 1, 0))
+                    fancyprint(f'  After transpose: dq.shape={dq.shape}')
 
-                # takw last group for mask
+                # take last group for mask
                 dq_for_mask = dq[:, -1, :, :]
+                fancyprint(f'  Took last group: dq_for_mask.shape={dq_for_mask.shape}')
 
-                #  boolean mask - anything non-zero flag  is bad
+                # boolean mask - anything non-zero flag is bad
                 bad_pixels = (dq_for_mask > 0).astype(bool)
+                fancyprint(f'  bad_pixels (before broadcast).shape={bad_pixels.shape}')
 
-                # all groups
+                # expand to all groups
                 bad_pixels = bad_pixels[:, np.newaxis, :, :]
-                bad_pixels = np.broadcast_to(bad_pixels, data.shape) # just keeping 4D as ill remove later
+                fancyprint(f'  After newaxis: bad_pixels.shape={bad_pixels.shape}')
+
+                bad_pixels = np.broadcast_to(bad_pixels, data.shape)
+                fancyprint(f'  After broadcast to data.shape: bad_pixels.shape={bad_pixels.shape}')
             else:
                 # 3D data (post-RampFit) has shape (nint, y, x)
+                fancyprint(f'  3D processing: dq.ndim={dq.ndim}, dq.shape={dq.shape}')
+
                 if dq.ndim == 4:
-                    #  last group
+                    fancyprint(f'  DQ is 4D, taking last group')
                     dq_for_mask = dq[:, -1, :, :]
+                    fancyprint(f'  dq_for_mask.shape={dq_for_mask.shape}')
                 elif dq.ndim == 3:
-                    # GROUPDQ: (nint, y, x)
+                    fancyprint(f'  DQ is 3D, using as-is')
                     dq_for_mask = dq
                 elif dq.ndim == 2:
-                    # PIXELDQ: (y, x) - broadcast
+                    fancyprint(f'  DQ is 2D (PIXELDQ), broadcasting to data shape')
                     bad_pixels = (dq > 0).astype(bool)
                     bad_pixels = bad_pixels[np.newaxis, :, :]
                     bad_pixels = np.broadcast_to(bad_pixels, data.shape)
+                    fancyprint(f'  bad_pixels.shape={bad_pixels.shape}')
                     dq_for_mask = None
 
                 if dq_for_mask is not None:
                     bad_pixels = (dq_for_mask > 0).astype(bool)
+                    fancyprint(f'  bad_pixels.shape={bad_pixels.shape}')
 
             # Apply mask
+            fancyprint(f'  Applying mask: data.shape={data.shape}, err.shape={err.shape}, bad_pixels.shape={bad_pixels.shape}')
+
             data[bad_pixels] = np.nan
             err[bad_pixels] = np.nan
 
@@ -216,18 +236,22 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
         The centroids used (for caching)
     """
     fancyprint(f'=== Extracting {instrument} at current step ===')
+    fancyprint(f'  datafile: {datafile if isinstance(datafile, str) else "datamodel"}')
 
     # load with flags applied
+    fancyprint(f'  Loading data with DQ flags...')
     cube, ecube, is_4d = apply_dq_flags([datafile])
+    fancyprint(f'  Loaded: cube.shape={cube.shape}, ecube.shape={ecube.shape}, is_4d={is_4d}')
 
     # convert 4D to 3D if needed
     if is_4d:
-        fancyprint(f'4D data {cube.shape} -> taking last group')
+        fancyprint(f'  4D data detected: {cube.shape} -> taking last group')
         cube = cube[:, -1, :, :]
         ecube = ecube[:, -1, :, :]
-        fancyprint(f'Now 3D: {cube.shape}')
+        fancyprint(f'  Now 3D: cube.shape={cube.shape}, ecube.shape={ecube.shape}')
 
-    assert cube.ndim == 3, f"Expected 3D after conversion, got {cube.ndim}D"
+    assert cube.ndim == 3, f"Expected 3D after conversion, got {cube.ndim}D with shape {cube.shape}"
+    assert ecube.ndim == 3, f"Expected ecube 3D after conversion, got {ecube.ndim}D with shape {ecube.shape}"
 
     # get centroids
     if centroids is None:
