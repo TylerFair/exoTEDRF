@@ -1111,6 +1111,21 @@ def main():
                     # Extract from Stage 1 output
                     datafile = stage1_results[0]
 
+                    # For NIRSpec, need to run AssignWCSStep to get wavelength info
+                    if 'nirspec' in obs.lower():
+                        fancyprint("  Running AssignWCSStep for NIRSpec wavelength calibration...")
+                        stage2_results, _ = run_stage2(
+                            stage1_results,
+                            mode=run_cfg['observing_mode'],
+                            save_results=True,
+                            force_redo=False,
+                            skip_steps=['Extract2DStep', 'WaveCorrStep', 'FlatFieldStep', 'BackgroundStep',
+                                       'OneOverFStep_int', 'BadPixStep', 'PCAReconstructStep', 'TracingStep'],
+                            output_tag=run_cfg['output_tag'],
+                            **run_cfg.get('stage2_kwargs', {})
+                        )
+                        datafile = stage2_results[0]  # Use WCS-calibrated file for extraction
+
                 elif checkpoint['stage'] == 2:
                     # First, need Stage 1 results (use cached)
                     stage1_results = run_stage1(
