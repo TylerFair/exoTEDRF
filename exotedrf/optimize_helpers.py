@@ -14,6 +14,7 @@ import os
 from exotedrf import utils
 from exotedrf.utils import fancyprint
 from exotedrf.stage3 import get_wave_nirspec, get_wave_soss, get_wave_miri
+import matplotlib.pyplot as plt
 
 
 def apply_dq_flags(datafiles):
@@ -188,7 +189,7 @@ def do_box_extraction_nanaware(cube, ypos, width, extract_start=0, extract_end=N
     return f
 
 
-def extract_at_step(datafile, instrument, extract_width, centroids, baseline_ints, output_dir):
+def extract_at_step(datafile, instrument, extract_width, centroids, baseline_ints, output_dir, plot_diagnostic=True):
     """
     Extract spectra from a datafile at any pipeline step.
     Note: Errors are NOT returned since they're not needed for optimization.
@@ -206,6 +207,8 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
         Baseline integrations
     output_dir
         For caching centroids
+    plot_diagnostic : bool
+        If True, save diagnostic plot showing extraction aperture
 
     Returns
     spectral_dict
@@ -270,10 +273,68 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
         xstart = utils.get_nrs_trace_start(det, subarray, grating)
 
         flux = do_box_extraction_nanaware(cube, y1, width=extract_width, extract_start=xstart)
-        wave = get_wave_nirspec(datafile, centroids, cube.shape[0], cube.shape[2])
 
-        fancyprint(f'  NIRSpec extraction: flux.shape={flux.shape}, wave.shape={wave.shape}')
+        # For Phase 1 optimization, wavelength not needed (just use pixel indices)
+        # Wavelength calibration requires Stage 2 WCS, which we skip for efficiency
+        wave = np.arange(flux.shape[1], dtype=float)  # Dummy wavelength array (pixel indices)
+
+        fancyprint(f'  NIRSpec extraction: flux.shape={flux.shape}')
         fancyprint(f'  Flux stats: sum={np.nansum(flux):.6e}, mean={np.nanmean(flux):.6e}, median={np.nanmedian(flux):.6e}')
+        fancyprint(f'  Using pixel indices as wavelength (Stage 1 optimization)')
+
+        # Diagnostic plots
+        if plot_diagnostic:
+            median_frame = np.nanmedian(cube, axis=0)
+
+            # Identify flagged (NaN) pixels in median frame
+            nan_mask = np.isnan(median_frame)
+            nan_y, nan_x = np.where(nan_mask)
+
+            # Plot 1: 2D aperture overlay
+            plt.figure(figsize=(12, 4))
+            plt.imshow(median_frame, aspect='auto', origin='lower', vmin=np.nanpercentile(median_frame, 5), vmax=np.nanpercentile(median_frame, 95))
+
+            # Overlay flagged pixels as red dots
+            if len(nan_x) > 0:
+                plt.plot(nan_x, nan_y, 'r.', markersize=0.5, alpha=0.5, label=f'Flagged pixels ({len(nan_x)})')
+
+            plt.plot(x1, y1, 'lime', linewidth=1.5, label='Trace center')
+            plt.plot(x1, y1 + extract_width/2, 'y--', linewidth=1, label=f'Aperture (width={extract_width})')
+            plt.plot(x1, y1 - extract_width/2, 'y--', linewidth=1)
+            plt.xlabel('X pixel')
+            plt.ylabel('Y pixel')
+            plt.title(f'NIRSpec Extraction (width={extract_width})')
+            plt.colorbar(label='Median Flux')
+            plt.legend()
+            plot_path = os.path.join(output_dir, f'extraction_diagnostic_nirspec_w{extract_width}.png')
+            plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            fancyprint(f'  Saved 2D diagnostic plot: {plot_path}')
+            fancyprint(f'  Flagged pixels in median: {len(nan_x)}/{nan_mask.size} ({100*len(nan_x)/nan_mask.size:.2f}%)')
+
+            # Plot 2: 1D extracted spectrum
+            median_flux = np.nanmedian(flux, axis=0)
+            fig, ax = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+
+            # Top: median spectrum
+            ax[0].plot(wave, median_flux, 'k-', linewidth=0.5, alpha=0.7)
+            ax[0].set_ylabel('Median Flux')
+            ax[0].set_title(f'NIRSpec Extracted Spectrum (width={extract_width})')
+            ax[0].grid(alpha=0.3)
+
+            # Bottom: first few integrations
+            for i in range(min(5, flux.shape[0])):
+                ax[1].plot(wave, flux[i], linewidth=0.5, alpha=0.5, label=f'Int {i}')
+            ax[1].set_xlabel('Pixel')
+            ax[1].set_ylabel('Flux')
+            ax[1].legend(fontsize=8, ncol=5)
+            ax[1].grid(alpha=0.3)
+
+            plt.tight_layout()
+            plot_path_1d = os.path.join(output_dir, f'extraction_spectrum_nirspec_w{extract_width}.png')
+            plt.savefig(plot_path_1d, dpi=150, bbox_inches='tight')
+            plt.close()
+            fancyprint(f'  Saved 1D spectrum plot: {plot_path_1d}')
 
         return {'Wave': wave, 'Flux': flux}, centroids
 
@@ -299,6 +360,80 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
 
         wave_o1, wave_o2 = get_wave_soss(datafile)
 
+        # Diagnostic plots
+        if plot_diagnostic:
+            median_frame = np.nanmedian(cube, axis=0)
+
+            # Identify flagged (NaN) pixels in median frame
+            nan_mask = np.isnan(median_frame)
+            nan_y, nan_x = np.where(nan_mask)
+
+            # Plot 1: 2D aperture overlay
+            plt.figure(figsize=(12, 8))
+            plt.imshow(median_frame, aspect='auto', origin='lower', vmin=np.nanpercentile(median_frame, 5), vmax=np.nanpercentile(median_frame, 95))
+
+            # Overlay flagged pixels as red dots
+            if len(nan_x) > 0:
+                plt.plot(nan_x, nan_y, 'r.', markersize=0.5, alpha=0.5, label=f'Flagged pixels ({len(nan_x)})')
+
+            plt.plot(x1, y1, 'lime', linewidth=1.5, label='Order 1 center')
+            plt.plot(x1, y1 + w1/2, 'y--', linewidth=1, label=f'O1 aperture (width={w1})')
+            plt.plot(x1, y1 - w1/2, 'y--', linewidth=1)
+            # Order 2 (only finite values)
+            valid_o2 = np.isfinite(y2)
+            plt.plot(x1[valid_o2], y2[valid_o2], 'c-', linewidth=1.5, label='Order 2 center')
+            plt.plot(x1[valid_o2], y2[valid_o2] + w2/2, 'm--', linewidth=1, label=f'O2 aperture (width={w2})')
+            plt.plot(x1[valid_o2], y2[valid_o2] - w2/2, 'm--', linewidth=1)
+            plt.xlabel('X pixel')
+            plt.ylabel('Y pixel')
+            plt.title(f'NIRISS/SOSS Extraction (O1 width={w1}, O2 width={w2})')
+            plt.colorbar(label='Median Flux')
+            plt.legend()
+            plot_path = os.path.join(output_dir, f'extraction_diagnostic_soss_w{w1}.png')
+            plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            fancyprint(f'  Saved 2D diagnostic plot: {plot_path}')
+            fancyprint(f'  Flagged pixels in median: {len(nan_x)}/{nan_mask.size} ({100*len(nan_x)/nan_mask.size:.2f}%)')
+
+            # Plot 2: 1D extracted spectra for both orders
+            fig, axes = plt.subplots(2, 2, figsize=(14, 8))
+
+            # Order 1 - top row
+            median_flux_o1 = np.nanmedian(flux_o1, axis=0)
+            axes[0, 0].plot(wave_o1, median_flux_o1, 'k-', linewidth=0.5, alpha=0.7)
+            axes[0, 0].set_ylabel('Median Flux')
+            axes[0, 0].set_title(f'Order 1 Spectrum (width={w1})')
+            axes[0, 0].grid(alpha=0.3)
+
+            for i in range(min(5, flux_o1.shape[0])):
+                axes[0, 1].plot(wave_o1, flux_o1[i], linewidth=0.5, alpha=0.5, label=f'Int {i}')
+            axes[0, 1].set_ylabel('Flux')
+            axes[0, 1].set_title('Order 1 Sample Integrations')
+            axes[0, 1].legend(fontsize=8, ncol=5)
+            axes[0, 1].grid(alpha=0.3)
+
+            # Order 2 - bottom row
+            median_flux_o2 = np.nanmedian(flux_o2, axis=0)
+            axes[1, 0].plot(wave_o2, median_flux_o2, 'k-', linewidth=0.5, alpha=0.7)
+            axes[1, 0].set_xlabel('Wavelength (μm)')
+            axes[1, 0].set_ylabel('Median Flux')
+            axes[1, 0].set_title(f'Order 2 Spectrum (width={w2})')
+            axes[1, 0].grid(alpha=0.3)
+
+            for i in range(min(5, flux_o2.shape[0])):
+                axes[1, 1].plot(wave_o2, flux_o2[i], linewidth=0.5, alpha=0.5, label=f'Int {i}')
+            axes[1, 1].set_xlabel('Wavelength (μm)')
+            axes[1, 1].set_ylabel('Flux')
+            axes[1, 1].set_title('Order 2 Sample Integrations')
+            axes[1, 1].legend(fontsize=8, ncol=5)
+            axes[1, 1].grid(alpha=0.3)
+
+            plt.tight_layout()
+            plot_path_1d = os.path.join(output_dir, f'extraction_spectrum_soss_w{w1}.png')
+            plt.savefig(plot_path_1d, dpi=150, bbox_inches='tight')
+            plt.close()
+            fancyprint(f'  Saved 1D spectrum plot: {plot_path_1d}')
+
         return {
             'Wave O1': wave_o1, 'Flux O1': flux_o1,
             'Wave O2': wave_o2, 'Flux O2': flux_o2
@@ -313,6 +448,62 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
         )
 
         wave = get_wave_miri(datafile, centroids, cube.shape[0], cube.shape[1])
+
+        # Diagnostic plots (MIRI is rotated, so plot transpose)
+        if plot_diagnostic:
+            median_frame = np.nanmedian(cube.transpose(0, 2, 1), axis=0)
+
+            # Identify flagged (NaN) pixels in median frame
+            nan_mask = np.isnan(median_frame)
+            nan_y, nan_x = np.where(nan_mask)
+
+            # Plot 1: 2D aperture overlay
+            plt.figure(figsize=(12, 4))
+            plt.imshow(median_frame, aspect='auto', origin='lower', vmin=np.nanpercentile(median_frame, 5), vmax=np.nanpercentile(median_frame, 95))
+
+            # Overlay flagged pixels as red dots
+            if len(nan_x) > 0:
+                plt.plot(nan_x, nan_y, 'r.', markersize=0.5, alpha=0.5, label=f'Flagged pixels ({len(nan_x)})')
+
+            # Plot trace as function of Y position (for MIRI geometry)
+            y_coords = np.arange(len(x1))
+            plt.plot(y_coords, x1, 'lime', linewidth=1.5, label='Trace center')
+            plt.plot(y_coords, x1 + extract_width/2, 'y--', linewidth=1, label=f'Aperture (width={extract_width})')
+            plt.plot(y_coords, x1 - extract_width/2, 'y--', linewidth=1)
+            plt.xlabel('Y pixel')
+            plt.ylabel('X pixel')
+            plt.title(f'MIRI Extraction (width={extract_width})')
+            plt.colorbar(label='Median Flux')
+            plt.legend()
+            plot_path = os.path.join(output_dir, f'extraction_diagnostic_miri_w{extract_width}.png')
+            plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            fancyprint(f'  Saved 2D diagnostic plot: {plot_path}')
+            fancyprint(f'  Flagged pixels in median: {len(nan_x)}/{nan_mask.size} ({100*len(nan_x)/nan_mask.size:.2f}%)')
+
+            # Plot 2: 1D extracted spectrum
+            median_flux = np.nanmedian(flux, axis=0)
+            fig, ax = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+
+            # Top: median spectrum
+            ax[0].plot(wave, median_flux, 'k-', linewidth=0.5, alpha=0.7)
+            ax[0].set_ylabel('Median Flux')
+            ax[0].set_title(f'MIRI Extracted Spectrum (width={extract_width})')
+            ax[0].grid(alpha=0.3)
+
+            # Bottom: first few integrations
+            for i in range(min(5, flux.shape[0])):
+                ax[1].plot(wave, flux[i], linewidth=0.5, alpha=0.5, label=f'Int {i}')
+            ax[1].set_xlabel('Wavelength (μm)')
+            ax[1].set_ylabel('Flux')
+            ax[1].legend(fontsize=8, ncol=5)
+            ax[1].grid(alpha=0.3)
+
+            plt.tight_layout()
+            plot_path_1d = os.path.join(output_dir, f'extraction_spectrum_miri_w{extract_width}.png')
+            plt.savefig(plot_path_1d, dpi=150, bbox_inches='tight')
+            plt.close()
+            fancyprint(f'  Saved 1D spectrum plot: {plot_path_1d}')
 
         return {'Wave': wave, 'Flux': flux}, centroids
 
