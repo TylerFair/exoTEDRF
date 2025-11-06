@@ -19,36 +19,32 @@ from exotedrf.stage3 import get_wave_nirspec, get_wave_soss, get_wave_miri
 def apply_dq_flags(datafiles):
     """
     Load data and apply DQ flags by NaN-ing out bad pixels.
-    Follows existing pattern from stage2.py.
+    Errors are NOT loaded/returned since they're not needed for optimization.
 
     Parameters
-    datafiles 
+    datafiles
 
     Returns
-    cube  : array 
+    cube  : array
         Flux with bad pixels as NaN
-    ecube  : array 
-        Errors with bad pixels as NaN
     is_4d : bool
         True if pre-RampFit (4D), False if post (3D)
     """
     datafiles = np.atleast_1d(datafiles)
 
-    # get flux, errors, and DQ (from badpixstep)
+    # get flux and DQ (errors not needed for optimization)
     for i, file in enumerate(datafiles):
         fancyprint(f'Loading segment {i}: {file if isinstance(file, str) else "datamodel"}')
 
         if isinstance(file, str):
             data = fits.getdata(file, 1)
-            err = fits.getdata(file, 2)
             dq = fits.getdata(file, 3)
-            fancyprint(f'  Loaded from FITS: data.shape={data.shape}, err.shape={err.shape}, dq.shape={dq.shape}')
+            fancyprint(f'  Loaded from FITS: data.shape={data.shape}, dq.shape={dq.shape}')
         else:
             with utils.open_filetype(file) as datamodel:
                 data = datamodel.data
-                err = datamodel.err
                 dq = datamodel.dq
-                fancyprint(f'  Loaded from datamodel: data.shape={data.shape}, err.shape={err.shape}, dq.shape={dq.shape if dq is not None else None}')
+                fancyprint(f'  Loaded from datamodel: data.shape={data.shape}, dq.shape={dq.shape if dq is not None else None}')
 
         if dq is not None:
             # for 4D data (pre-rampfit), take last group
@@ -103,10 +99,9 @@ def apply_dq_flags(datafiles):
                     fancyprint(f'  bad_pixels.shape={bad_pixels.shape}')
 
             # Apply mask
-            fancyprint(f'  Applying mask: data.shape={data.shape}, err.shape={err.shape}, bad_pixels.shape={bad_pixels.shape}')
+            fancyprint(f'  Applying mask: data.shape={data.shape}, bad_pixels.shape={bad_pixels.shape}')
 
             data[bad_pixels] = np.nan
-            err[bad_pixels] = np.nan
 
             n_bad = np.sum(bad_pixels)
             fancyprint(f'Segment {i}: Flagged {n_bad}/{bad_pixels.size} pixels ({100*n_bad/bad_pixels.size:.2f}%)')
@@ -117,33 +112,29 @@ def apply_dq_flags(datafiles):
         # concatenate segments
         if i == 0:
             cube = data
-            ecube = err
         else:
             cube = np.concatenate([cube, data])
-            ecube = np.concatenate([ecube, err])
 
-    return cube, ecube, is_4d
+    return cube, is_4d
 
 
-def do_box_extraction_nanaware(cube, err, ypos, width, extract_start=0, extract_end=None, progress=True):
+def do_box_extraction_nanaware(cube, ypos, width, extract_start=0, extract_end=None, progress=True):
     """
     Box extraction with nansum. Modified from stage3.do_box_extraction.
+    Note: Errors are NOT calculated since they're not needed for optimization.
 
     Parameters
     cube :  (nint, y, x)
-    err :  (nint, y, x)
-    ypos 
+    ypos
         Y positions
-    width : 
+    width :
         extraction  width
     extract_start : int
     extract_end : int or None
 
     Returns
-    f :  (nint, nx)
-    ferr :  (nint, nx)
+    f :  (nint, nx) - Extracted flux
     """
-    assert np.shape(cube) == np.shape(err)
     assert cube.ndim == 3, f"Expected 3D, got {cube.ndim}D shape {cube.shape}"
 
     nint, dimy, dimx = np.shape(cube)
@@ -151,7 +142,7 @@ def do_box_extraction_nanaware(cube, err, ypos, width, extract_start=0, extract_
     if extract_end is None:
         extract_end = dimx
 
-    f, ferr = np.zeros((nint, dimx)), np.zeros((nint, dimx))
+    f = np.zeros((nint, dimx))
 
     edge_up = np.min([ypos + width / 2, np.ones_like(ypos) * dimy], axis=0)
     edge_low = np.max([ypos - width / 2, np.zeros_like(ypos)], axis=0)
@@ -167,10 +158,8 @@ def do_box_extraction_nanaware(cube, err, ypos, width, extract_start=0, extract_
 
             #  total flux and total valid pixel area
             box = cube[i, low_whole:up_whole, x]
-            err_box = err[i, low_whole:up_whole, x]
 
             total_flux = np.nansum(box)
-            total_err_sq = np.nansum(err_box**2)
             total_area = np.sum(np.isfinite(box))  #   valid whole pixels
 
             # add partial pixels
@@ -190,49 +179,38 @@ def do_box_extraction_nanaware(cube, err, ypos, width, extract_start=0, extract_
                     total_flux += low_part * low_val
                     total_area += low_part
 
-                # add partial pixel errors
-                up_err_val = err[i, up_whole, x]
-                low_err_val = err[i, low_whole-1, x]
-
-                if np.isfinite(up_err_val):
-                    total_err_sq += up_part * up_err_val**2
-
-                if np.isfinite(low_err_val):
-                    total_err_sq += low_part * low_err_val**2
-
             # normalize by total valid pixel area
             if total_area > 0:
                 f[i, x] = total_flux / total_area
-                ferr[i, x] = np.sqrt(total_err_sq) / total_area
             else:
                 f[i, x] = np.nan
-                ferr[i, x] = np.nan
 
-    return f, ferr
+    return f
 
 
 def extract_at_step(datafile, instrument, extract_width, centroids, baseline_ints, output_dir):
     """
     Extract spectra from a datafile at any pipeline step.
+    Note: Errors are NOT returned since they're not needed for optimization.
 
     Parameters
-    datafile 
+    datafile
          datafile to extract (should be first segment if all is well)
-    instrument 
+    instrument
         'NIRISS', 'NIRSPEC', or 'MIRI'
-    extract_width 
+    extract_width
         Extraction width (dict with 'o1'/'o2' for SOSS)
-    centroids 
+    centroids
         Centroids (will generate/cache if None)
-    baseline_ints 
+    baseline_ints
         Baseline integrations
     output_dir
         For caching centroids
 
     Returns
-    spectral_dict 
-        Keys: 'Wave', 'Flux', 'Err' (and O1/O2 versions for SOSS)
-    centroids 
+    spectral_dict
+        Keys: 'Wave', 'Flux' (and O1/O2 versions for SOSS) - no errors
+    centroids
         The centroids used (for caching)
     """
     fancyprint(f'=== Extracting {instrument} at current step ===')
@@ -240,18 +218,16 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
 
     # load with flags applied
     fancyprint(f'  Loading data with DQ flags...')
-    cube, ecube, is_4d = apply_dq_flags([datafile])
-    fancyprint(f'  Loaded: cube.shape={cube.shape}, ecube.shape={ecube.shape}, is_4d={is_4d}')
+    cube, is_4d = apply_dq_flags([datafile])
+    fancyprint(f'  Loaded: cube.shape={cube.shape}, is_4d={is_4d}')
 
     # convert 4D to 3D if needed
     if is_4d:
         fancyprint(f'  4D data detected: {cube.shape} -> taking last group')
         cube = cube[:, -1, :, :]
-        ecube = ecube[:, -1, :, :]
-        fancyprint(f'  Now 3D: cube.shape={cube.shape}, ecube.shape={ecube.shape}')
+        fancyprint(f'  Now 3D: cube.shape={cube.shape}')
 
     assert cube.ndim == 3, f"Expected 3D after conversion, got {cube.ndim}D with shape {cube.shape}"
-    assert ecube.ndim == 3, f"Expected ecube 3D after conversion, got {ecube.ndim}D with shape {ecube.shape}"
 
     # get centroids
     if centroids is None:
@@ -301,10 +277,10 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
         grating = utils.get_nrs_grating(datafile)
         xstart = utils.get_nrs_trace_start(det, subarray, grating)
 
-        flux, ferr = do_box_extraction_nanaware(cube, ecube, y1, width=extract_width, extract_start=xstart)
+        flux = do_box_extraction_nanaware(cube, y1, width=extract_width, extract_start=xstart)
         wave = get_wave_nirspec(datafile, centroids, cube.shape[0], cube.shape[2])
 
-        return {'Wave': wave, 'Flux': flux, 'Err': ferr}, centroids
+        return {'Wave': wave, 'Flux': flux}, centroids
 
     elif instrument == 'NIRISS':
         x1 = centroids['xpos'].values
@@ -316,30 +292,30 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
         else:
             w1 = w2 = extract_width
 
-        flux_o1, ferr_o1 = do_box_extraction_nanaware(cube, ecube, y1, width=w1)
+        flux_o1 = do_box_extraction_nanaware(cube, y1, width=w1)
 
         ii = np.where(np.isfinite(y2))[0]
         y2_finite = y2[ii]
-        flux_o2, ferr_o2 = do_box_extraction_nanaware(cube, ecube, y2_finite, width=w2, extract_end=len(y2_finite))
+        flux_o2 = do_box_extraction_nanaware(cube, y2_finite, width=w2, extract_end=len(y2_finite))
 
         wave_o1, wave_o2 = get_wave_soss(datafile)
 
         return {
-            'Wave O1': wave_o1, 'Flux O1': flux_o1, 'Err O1': ferr_o1,
-            'Wave O2': wave_o2, 'Flux O2': flux_o2, 'Err O2': ferr_o2
+            'Wave O1': wave_o1, 'Flux O1': flux_o1,
+            'Wave O2': wave_o2, 'Flux O2': flux_o2
         }, centroids
 
     elif instrument == 'MIRI':
         x1, y1 = centroids['xpos'].values, centroids['ypos'].values
 
-        flux, ferr = do_box_extraction_nanaware(
-            cube.transpose(0, 2, 1), ecube.transpose(0, 2, 1), x1,
+        flux = do_box_extraction_nanaware(
+            cube.transpose(0, 2, 1), x1,
             width=extract_width, extract_start=int(np.min(y1)), extract_end=int(np.max(y1))
         )
 
         wave = get_wave_miri(datafile, centroids, cube.shape[0], cube.shape[1])
 
-        return {'Wave': wave, 'Flux': flux, 'Err': ferr}, centroids
+        return {'Wave': wave, 'Flux': flux}, centroids
 
     else:
         raise ValueError(f"Unknown instrument: {instrument}")
