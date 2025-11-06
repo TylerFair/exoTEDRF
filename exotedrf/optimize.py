@@ -1020,29 +1020,6 @@ def main():
 
                 fancyprint(f"\nTesting {param_name}={param_value}")
 
-                # Delete cached output for the optimization step to force rerun
-                # Note: Stage 3 (Extract) doesn't need deletion since extract_at_step is called directly
-                if not debug_mode:
-                    step_output_pattern = None
-                    if checkpoint['name'] == 'OneOverFStep_grp':
-                        step_output_pattern = f"{outdir_s1}*_OneOverFStep_grp.fits"
-                    elif checkpoint['name'] == 'JumpStep':
-                        step_output_pattern = f"{outdir_s1}*_jump.fits"
-                    elif checkpoint['name'] == 'BackgroundStep':
-                        step_output_pattern = f"{outdir_s2}*_BackgroundStep.fits"
-                    elif checkpoint['name'] == 'BadPixStep':
-                        step_output_pattern = f"{outdir_s2}*_BadPixStep.fits"
-
-                    if step_output_pattern:
-                        files_to_delete = glob.glob(step_output_pattern)
-                        if files_to_delete:
-                            fancyprint(f"Deleting {len(files_to_delete)} cached file(s) for {checkpoint['name']}:")
-                            for cached_file in files_to_delete:
-                                fancyprint(f"  - {cached_file}")
-                                os.remove(cached_file)
-                        else:
-                            fancyprint(f"No cached files found matching: {step_output_pattern}")
-
                 # run pipeline up to (including this step)
                 if checkpoint['stage'] == 1:
                     # Build skip list: skip everything after this step
@@ -1055,8 +1032,7 @@ def main():
                             s1_kwargs['JumpStep'] = {}
                         s1_kwargs['JumpStep']['time_window'] = param_value
 
-                    # Run Stage 1 with force_redo=False
-                    # The deleted cached file will trigger rerun from that step onward
+                    # Run Stage 1 
                     stage1_results = run_stage1(
                         single_segment,
                         mode=run_cfg['observing_mode'],
@@ -1068,7 +1044,7 @@ def main():
                         soss_timeseries_o2=run_cfg.get('soss_timeseries_o2'),
                         save_results=True,
                         pixel_masks=run_cfg.get('outlier_maps'),
-                        force_redo=False,  # Use cached until missing file triggers rerun
+                        force_redo=True,
                         flag_up_ramp=run_cfg.get('flag_up_ramp', False),
                         rejection_threshold=run_cfg.get('jump_threshold', 15),
                         flag_in_time=run_cfg.get('flag_in_time', True),
@@ -1403,3 +1379,4 @@ def main():
 
 if __name__ == "__main__":
     main() 
+
