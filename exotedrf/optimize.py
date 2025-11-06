@@ -1019,48 +1019,44 @@ def main():
                 run_cfg[param_name] = param_value  # Current  value
 
                 fancyprint(f"\nTesting {param_name}={param_value}")
-		# Delete cached output for the optimization step to force rerun
+
+                # Delete cached output for the optimization step to force rerun
+                # Note: Stage 3 (Extract) doesn't need deletion since extract_at_step is called directly
                 if not debug_mode:
                     step_output_pattern = None
                     if checkpoint['name'] == 'OneOverFStep_grp':
-                        step_output_pattern = f"{cfg['pipeline_outputs_directory']}/Stage1/*_OneOverFStep_grp.fits"
+                        step_output_pattern = f"{outdir_s1}*_OneOverFStep_grp.fits"
                     elif checkpoint['name'] == 'JumpStep':
-                        step_output_pattern = f"{cfg['pipeline_outputs_directory']}/Stage1/*_jump.fits"
+                        step_output_pattern = f"{outdir_s1}*_jump.fits"
                     elif checkpoint['name'] == 'BackgroundStep':
-                        step_output_pattern = f"{cfg['pipeline_outputs_directory']}/Stage2/*_BackgroundStep.fits"
+                        step_output_pattern = f"{outdir_s2}*_BackgroundStep.fits"
                     elif checkpoint['name'] == 'BadPixStep':
-                        step_output_pattern = f"{cfg['pipeline_outputs_directory']}/Stage2/*_BadPixStep.fits"
+                        step_output_pattern = f"{outdir_s2}*_BadPixStep.fits"
 
                     if step_output_pattern:
-                        import glob
-                        for cached_file in glob.glob(step_output_pattern):
-                            fancyprint(f"Deleting cached step output: {cached_file}")
-                            os.remove(cached_file)
+                        files_to_delete = glob.glob(step_output_pattern)
+                        if files_to_delete:
+                            fancyprint(f"Deleting {len(files_to_delete)} cached file(s) for {checkpoint['name']}:")
+                            for cached_file in files_to_delete:
+                                fancyprint(f"  - {cached_file}")
+                                os.remove(cached_file)
+                        else:
+                            fancyprint(f"No cached files found matching: {step_output_pattern}")
 
                 # run pipeline up to (including this step)
                 if checkpoint['stage'] == 1:
                     # Build skip list: skip everything after this step
                     skip_list = checkpoint['skip_after'].copy()
 
-                    # Build step-specific kwargs and force only the optimization step to redo
-                    s1_args = {}
+                    # Pass time_window parameter to JumpStep if optimizing it
+                    s1_kwargs = run_cfg.get('stage1_kwargs', {}).copy()
+                    if checkpoint['name'] == 'JumpStep' and param_name == 'time_window':
+                        if 'JumpStep' not in s1_kwargs:
+                            s1_kwargs['JumpStep'] = {}
+                        s1_kwargs['JumpStep']['time_window'] = param_value
 
-                    # Determine which step is being optimized and force it to redo (unless debug_mode)
-                    if checkpoint['name'] == 'OneOverFStep_grp':
-                        # Force OneOverFStep to redo
-                        if not debug_mode:
-                            s1_args['OneOverFStep_grp'] = {'force_redo': True}
-                    elif checkpoint['name'] == 'JumpStep':
-                        # Force JumpStep to redo, and pass time_window if optimizing it
-                        jump_kwargs = {}
-                        if not debug_mode:
-                            jump_kwargs['force_redo'] = True
-                        if param_name == 'time_window':
-                            jump_kwargs['time_window'] = param_value
-                        if jump_kwargs:
-                            s1_args['JumpStep'] = jump_kwargs
-
-                    # Run Stage 1 with stage-level force_redo=False, but step-level force_redo=True
+                    # Run Stage 1 with force_redo=False
+                    # The deleted cached file will trigger rerun from that step onward
                     stage1_results = run_stage1(
                         single_segment,
                         mode=run_cfg['observing_mode'],
@@ -1072,7 +1068,7 @@ def main():
                         soss_timeseries_o2=run_cfg.get('soss_timeseries_o2'),
                         save_results=True,
                         pixel_masks=run_cfg.get('outlier_maps'),
-                        force_redo=False,  # Stage-level: use cached outputs
+                        force_redo=False,  # Use cached until missing file triggers rerun
                         flag_up_ramp=run_cfg.get('flag_up_ramp', False),
                         rejection_threshold=run_cfg.get('jump_threshold', 15),
                         flag_in_time=run_cfg.get('flag_in_time', True),
@@ -1086,8 +1082,7 @@ def main():
                         centroids=run_cfg.get('centroids'),
                         hot_pixel_map=run_cfg.get('hot_pixel_map'),
                         miri_drop_groups=run_cfg.get('miri_drop_groups'),
-                        **run_cfg.get('stage1_kwargs', {}),
-                        **s1_args
+                        **s1_kwargs
                     )
 
                     # Extract from Stage 1 output
@@ -1106,7 +1101,7 @@ def main():
                         soss_timeseries_o2=run_cfg.get('soss_timeseries_o2'),
                         save_results=True,
                         pixel_masks=run_cfg.get('outlier_maps'),
-                        force_redo=False,  # Use cached
+                        force_redo=False,  # Use cached Stage 1 results
                         flag_up_ramp=run_cfg.get('flag_up_ramp', False),
                         rejection_threshold=run_cfg.get('jump_threshold', 15),
                         flag_in_time=run_cfg.get('flag_in_time', True),
@@ -1125,34 +1120,25 @@ def main():
                     # Build skip list for Stage 2
                     skip_list = checkpoint['skip_after'].copy()
 
-                    # Build step-specific kwargs and force only the optimization step to redo
-                    s2_args = {}
-
-                    # Determine which step is being optimized and force it to redo (unless debug_mode)
-                    if checkpoint['name'] == 'BackgroundStep':
-                        # Force BackgroundStep to redo
-                        if not debug_mode:
-                            s2_args['BackgroundStep'] = {'force_redo': True}
-                    elif checkpoint['name'] == 'BadPixStep':
-                        # Force BadPixStep to redo, and pass parameters if optimizing them
-                        badpix_kwargs = {}
-                        if not debug_mode:
-                            badpix_kwargs['force_redo'] = True
+                    # Pass step-specific parameters if optimizing them
+                    s2_kwargs = run_cfg.get('stage2_kwargs', {}).copy()
+                    if checkpoint['name'] == 'BadPixStep':
+                        if 'BadPixStep' not in s2_kwargs:
+                            s2_kwargs['BadPixStep'] = {}
                         if param_name == 'box_size':
-                            badpix_kwargs['box_size'] = param_value
+                            s2_kwargs['BadPixStep']['box_size'] = param_value
                         if param_name == 'window_size':
-                            badpix_kwargs['window_size'] = param_value
-                        if badpix_kwargs:
-                            s2_args['BadPixStep'] = badpix_kwargs
+                            s2_kwargs['BadPixStep']['window_size'] = param_value
 
-                    # Run Stage 2 with stage-level force_redo=False, but step-level force_redo=True
+                    # Run Stage 2 with force_redo=False
+                    # The deleted cached file will trigger rerun from that step onward
                     stage2_results, stage2_centroids = run_stage2(
                         stage1_results,
                         mode=run_cfg['observing_mode'],
                         soss_background_model=run_cfg.get('soss_background_file'),
                         baseline_ints=run_cfg['baseline_ints'],
                         save_results=True,
-                        force_redo=False,  # Stage-level: use cached outputs
+                        force_redo=False,  # Use cached until missing file triggers rerun
                         space_thresh=run_cfg.get('space_outlier_threshold'),
                         time_thresh=run_cfg.get('time_outlier_threshold'),
                         remove_components=run_cfg.get('remove_components'),
@@ -1175,8 +1161,7 @@ def main():
                         miri_trace_width=run_cfg.get('miri_trace_width'),
                         miri_background_width=run_cfg.get('miri_background_width'),
                         miri_background_method=run_cfg.get('miri_background_method'),
-                        **run_cfg.get('stage2_kwargs', {}),
-                        **s2_args
+                        **s2_kwargs
                     )
 
                     if isinstance(stage2_centroids, np.ndarray):
@@ -1415,12 +1400,6 @@ def main():
     fancyprint(f"TOTAL RUNTIME: {h}h {m:02d}min {s:02d}s")
     fancyprint(f"OPTIMAL PARAMETERS: {current_best}")
     fancyprint(f"{'='*60}\n")
-
-
-
-
-
-
 
 if __name__ == "__main__":
     main() 
