@@ -231,47 +231,38 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
 
     # get centroids
     if centroids is None:
-        cache_file = os.path.join(output_dir, 'cached_centroids.csv')
-        if os.path.exists(cache_file):
-            fancyprint(f'Loading cached centroids: {cache_file}')
-            centroids = pd.read_csv(cache_file, comment='#')
-        else:
-            fancyprint('Generating centroids from deep stack')
-            deepstack = utils.make_baseline_stack_general(datafiles=[datafile], baseline_ints=baseline_ints)
-            if np.ndim(deepstack) == 3:
-                deepstack = deepstack[-1]
+        fancyprint('Generating centroids from deep stack')
+        centroids = {}
+        deepstack = utils.make_baseline_stack_general(datafiles=[datafile], baseline_ints=baseline_ints)
+        if np.ndim(deepstack) == 3:
+            deepstack = deepstack[-1]
 
-            if instrument == 'NIRISS':
-                from jwst.pipeline import calwebb_spec2
-                subarray = utils.get_soss_subarray(datafile)
-                step = calwebb_spec2.extract_1d_step.Extract1dStep()
-                tracetable = step.get_reference_file(datafile, 'spectrace')
-                cens = utils.get_centroids_soss(deepstack, tracetable, subarray, save_results=False)
-                centroids = pd.DataFrame({
-                    'xpos': cens[0][0],
-                    'ypos o1': cens[0][1],
-                    'ypos o2': cens[1][1],
-                    'ypos o3': cens[2][1]
-                }) # copying logic from satge1 1/f 
-            elif instrument == 'NIRSPEC':
-                det = utils.get_nrs_detector_name(datafile)
-                subarray = utils.get_soss_subarray(datafile)
-                grating = utils.get_nrs_grating(datafile)
-                xstart = utils.get_nrs_trace_start(det, subarray, grating)
-                cens = utils.get_centroids_nirspec(deepstack, xstart=xstart, save_results=False)
-                centroids = pd.DataFrame({'xpos': cens[0], 'ypos': cens[1]})
-            elif instrument == 'MIRI':
-                from exotedrf.stage2 import TracingStep
-                tracer = TracingStep([datafile], deepframe=deepstack, output_dir=output_dir)
-                cens = tracer.run(save_results=False, force_redo=False)
-                centroids = pd.DataFrame({'xpos': cens[0], 'ypos': cens[1]})
-
-            centroids.to_csv(cache_file, index=False)
-            fancyprint(f'Cached centroids: {cache_file}')
+        if instrument == 'NIRISS':
+            from jwst.pipeline import calwebb_spec2
+            subarray = utils.get_soss_subarray(datafile)
+            step = calwebb_spec2.extract_1d_step.Extract1dStep()
+            tracetable = step.get_reference_file(datafile, 'spectrace')
+            cens = utils.get_centroids_soss(deepstack, tracetable, subarray, save_results=False)
+            centroids['xpos'] = cens[0][0]
+            centroids['ypos o1'] = cens[0][1]
+            centroids['ypos o2'] = cens[1][1]
+            centroids['ypos o3'] = cens[2][1]
+        elif instrument == 'NIRSPEC':
+            det = utils.get_nrs_detector_name(datafile)
+            subarray = utils.get_soss_subarray(datafile)
+            grating = utils.get_nrs_grating(datafile)
+            xstart = utils.get_nrs_trace_start(det, subarray, grating)
+            cens = utils.get_centroids_nirspec(deepstack, xstart=xstart, save_results=False)
+            centroids['xpos'], centroids['ypos'] = cens[0], cens[1]
+        elif instrument == 'MIRI':
+            from exotedrf.stage2 import TracingStep
+            tracer = TracingStep([datafile], deepframe=deepstack, output_dir=output_dir)
+            cens = tracer.run(save_results=False, force_redo=False)
+            centroids['xpos'], centroids['ypos'] = cens[0], cens[1]
 
     # extract by instrument
     if instrument == 'NIRSPEC':
-        x1, y1 = centroids['xpos'].values, centroids['ypos'].values
+        x1, y1 = centroids['xpos'], centroids['ypos']
         det = utils.get_nrs_detector_name(datafile)
         subarray = utils.get_soss_subarray(datafile)
         grating = utils.get_nrs_grating(datafile)
@@ -283,8 +274,8 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
         return {'Wave': wave, 'Flux': flux}, centroids
 
     elif instrument == 'NIRISS':
-        x1 = centroids['xpos'].values
-        y1, y2 = centroids['ypos o1'].values, centroids['ypos o2'].values
+        x1 = centroids['xpos']
+        y1, y2 = centroids['ypos o1'], centroids['ypos o2']
 
         if isinstance(extract_width, dict):
             w1 = extract_width.get('o1', 40)
@@ -306,7 +297,7 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
         }, centroids
 
     elif instrument == 'MIRI':
-        x1, y1 = centroids['xpos'].values, centroids['ypos'].values
+        x1, y1 = centroids['xpos'], centroids['ypos']
 
         flux = do_box_extraction_nanaware(
             cube.transpose(0, 2, 1), x1,
