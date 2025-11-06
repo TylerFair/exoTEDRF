@@ -1024,13 +1024,14 @@ def main():
                 if not debug_mode:
                     step_output_pattern = None
                     if checkpoint['name'] == 'OneOverFStep_grp':
-                        step_output_pattern = f"{outdir_s1}*_OneOverFStep_grp.fits"
+                        step_output_pattern = f"{outdir_s1}*_oneoverfstep.fits"
                     elif checkpoint['name'] == 'JumpStep':
                         step_output_pattern = f"{outdir_s1}*_jump.fits"
+                       # TODO: CHECK IF NEED step_output_pattern = f"{outdir_s1}*_rampfitstep.fits"
                     elif checkpoint['name'] == 'BackgroundStep':
-                        step_output_pattern = f"{outdir_s2}*_BackgroundStep.fits"
+                        step_output_pattern = f"{outdir_s2}*_backgroundstep.fits"
                     elif checkpoint['name'] == 'BadPixStep':
-                        step_output_pattern = f"{outdir_s2}*_BadPixStep.fits"
+                        step_output_pattern = f"{outdir_s2}*_badpixstep.fits"
 
                     if step_output_pattern:
                         files_to_delete = glob.glob(step_output_pattern)
