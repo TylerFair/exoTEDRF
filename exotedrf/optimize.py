@@ -1124,6 +1124,18 @@ def main():
 
                 elif checkpoint['stage'] == 2:
                     # First, need Stage 1 results (use cached)
+                    # Build skip list for Stage 1 based on user config
+                    stage1_steps = ['DQInitStep', 'EmiCorrStep', 'SaturationStep', 'ResetStep', 'SuperBiasStep',
+                                    'RefPixStep', 'DarkCurrentStep', 'OneOverFStep_grp', 'LinearityStep', 'JumpStep',
+                                    'RampFitStep', 'GainScaleStep']
+                    stage1_skip_for_s2 = []
+                    for step in stage1_steps:
+                        if run_cfg.get(step) == 'skip':
+                            if step == 'OneOverFStep_grp':
+                                stage1_skip_for_s2.append('OneOverFStep')
+                            else:
+                                stage1_skip_for_s2.append(step)
+
                     stage1_results = run_stage1(
                         single_segment,
                         mode=run_cfg['observing_mode'],
@@ -1141,6 +1153,7 @@ def main():
                         flag_in_time=run_cfg.get('flag_in_time', True),
                         time_rejection_threshold=run_cfg.get('time_jump_threshold'),
                         output_tag=run_cfg['output_tag'],
+                        skip_steps=stage1_skip_for_s2,
                         do_plot=run_cfg.get('do_plots', False),
                         soss_inner_mask_width=run_cfg.get('soss_inner_mask_width'),
                         soss_outer_mask_width=run_cfg.get('soss_outer_mask_width'),
@@ -1216,6 +1229,18 @@ def main():
 
                 elif checkpoint['stage'] == 3:
                     # Need Stage 1 and 2 completed first (use cached)
+                    # Build skip list for Stage 1 based on user config
+                    stage1_steps = ['DQInitStep', 'EmiCorrStep', 'SaturationStep', 'ResetStep', 'SuperBiasStep',
+                                    'RefPixStep', 'DarkCurrentStep', 'OneOverFStep_grp', 'LinearityStep', 'JumpStep',
+                                    'RampFitStep', 'GainScaleStep']
+                    stage1_skip_for_s3 = []
+                    for step in stage1_steps:
+                        if run_cfg.get(step) == 'skip':
+                            if step == 'OneOverFStep_grp':
+                                stage1_skip_for_s3.append('OneOverFStep')
+                            else:
+                                stage1_skip_for_s3.append(step)
+
                     stage1_results = run_stage1(
                         single_segment,
                         mode=run_cfg['observing_mode'],
@@ -1233,6 +1258,7 @@ def main():
                         flag_in_time=run_cfg.get('flag_in_time', True),
                         time_rejection_threshold=run_cfg.get('time_jump_threshold'),
                         output_tag=run_cfg['output_tag'],
+                        skip_steps=stage1_skip_for_s3,
                         do_plot=run_cfg.get('do_plots', False),
                         soss_inner_mask_width=run_cfg.get('soss_inner_mask_width'),
                         soss_outer_mask_width=run_cfg.get('soss_outer_mask_width'),
@@ -1242,6 +1268,18 @@ def main():
                         miri_drop_groups=run_cfg.get('miri_drop_groups'),
                         **run_cfg.get('stage1_kwargs', {})
                     )
+
+                    # Build skip list for Stage 2 based on user config
+                    stage2_steps = ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep', 'WaveCorrStep',
+                                    'FlatFieldStep', 'OneOverFStep_int', 'BackgroundStep', 'TracingStep',
+                                    'BadPixStep', 'PCAReconstructStep']
+                    stage2_skip_for_s3 = []
+                    for step in stage2_steps:
+                        if run_cfg.get(step) == 'skip':
+                            if step == 'OneOverFStep_int':
+                                stage2_skip_for_s3.append('OneOverFStep')
+                            else:
+                                stage2_skip_for_s3.append(step)
 
                     stage2_results, _ = run_stage2(
                         stage1_results,
@@ -1258,6 +1296,7 @@ def main():
                         soss_timeseries_o2=run_cfg.get('soss_timeseries_o2'),
                         oof_method=run_cfg.get('oof_method'),
                         output_tag=run_cfg['output_tag'],
+                        skip_steps=stage2_skip_for_s3,
                         smoothing_scale=run_cfg.get('smoothing_scale'),
                         generate_lc=run_cfg.get('generate_lc'),
                         soss_inner_mask_width=run_cfg.get('soss_inner_mask_width'),
