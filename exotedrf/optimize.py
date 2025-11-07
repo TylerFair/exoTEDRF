@@ -1072,6 +1072,17 @@ def main():
                     # Build skip list: skip everything after this step
                     skip_list = checkpoint['skip_after'].copy()
 
+                    # ALSO add user's skip preferences from YAML config
+                    stage1_steps = ['DQInitStep', 'EmiCorrStep', 'SaturationStep', 'ResetStep', 'SuperBiasStep',
+                                    'RefPixStep', 'DarkCurrentStep', 'OneOverFStep_grp', 'LinearityStep', 'JumpStep',
+                                    'RampFitStep', 'GainScaleStep']
+                    for step in stage1_steps:
+                        if run_cfg.get(step) == 'skip' and step not in skip_list:
+                            if step == 'OneOverFStep_grp':
+                                skip_list.append('OneOverFStep')
+                            else:
+                                skip_list.append(step)
+
                     # Pass time_window parameter to JumpStep if optimizing it
                     s1_kwargs = run_cfg.get('stage1_kwargs', {}).copy()
                     if checkpoint['name'] == 'JumpStep' and param_name == 'time_window':
@@ -1142,6 +1153,17 @@ def main():
 
                     # Build skip list for Stage 2
                     skip_list = checkpoint['skip_after'].copy()
+
+                    # ALSO add user's skip preferences from YAML config
+                    stage2_steps = ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep', 'WaveCorrStep',
+                                    'FlatFieldStep', 'OneOverFStep_int', 'BackgroundStep', 'TracingStep',
+                                    'BadPixStep', 'PCAReconstructStep']
+                    for step in stage2_steps:
+                        if run_cfg.get(step) == 'skip' and step not in skip_list:
+                            if step == 'OneOverFStep_int':
+                                skip_list.append('OneOverFStep')
+                            else:
+                                skip_list.append(step)
 
                     # Pass step-specific parameters if optimizing them
                     s2_kwargs = run_cfg.get('stage2_kwargs', {}).copy()
@@ -1274,7 +1296,7 @@ def main():
                 # Compute cost
                 # For Phase 1, skip wave_range filtering (use all channels for relative comparison)
                 # Accurate wavelengths not available from Stage 1 files
-                phase1_wave_range = None
+                phase1_wave_range = None 
 
                 cost, scatter = cost_function(
                     spectral_dict,
