@@ -937,7 +937,7 @@ def main():
                     raise ValueError(f"{param_name} must be single value when optimize_{param_name}=False")
                 fixed_params[param_name] = val
 
-    # Initialize with mean values (?) 
+    # Initialize with mean values (?)
     current_best = {k: int(np.mean(v)) for k, v in param_ranges.items()}
     current_best.update(fixed_params)
 
@@ -1274,7 +1274,7 @@ def main():
                 # Compute cost
                 # For Phase 1, skip wave_range filtering (use all channels for relative comparison)
                 # Accurate wavelengths not available from Stage 1 files
-                phase1_wave_range = None
+                phase1_wave_range = None if checkpoint['stage'] == 1 else wave_range
 
                 cost, scatter = cost_function(
                     spectral_dict,
@@ -1330,6 +1330,20 @@ def main():
     final_cfg = cfg.copy()
     final_cfg.update(current_best)
 
+    # Build skip lists for Stage 1 and Stage 2 based on config settings
+    stage1_steps = ['DQInitStep', 'EmiCorrStep', 'SaturationStep', 'ResetStep', 'SuperBiasStep',
+                    'RefPixStep', 'DarkCurrentStep', 'OneOverFStep_grp', 'LinearityStep', 'JumpStep',
+                    'RampFitStep', 'GainScaleStep']
+    stage1_skip = []
+    for step in stage1_steps:
+        if final_cfg.get(step) == 'skip':
+            if step == 'OneOverFStep_grp':
+                stage1_skip.append('OneOverFStep')
+            else:
+                stage1_skip.append(step)
+
+    fancyprint(f"Stage 1 steps to skip: {stage1_skip}")
+
     # Stage 1
     stage1_results = run_stage1(
         input_files,
@@ -1348,6 +1362,7 @@ def main():
         flag_in_time=final_cfg.get('flag_in_time', True),
         time_rejection_threshold=final_cfg.get('time_jump_threshold'),
         output_tag=final_cfg['output_tag'],
+        skip_steps=stage1_skip,
         do_plot=final_cfg.get('do_plots', False),
         soss_inner_mask_width=final_cfg.get('soss_inner_mask_width'),
         soss_outer_mask_width=final_cfg.get('soss_outer_mask_width'),
@@ -1357,6 +1372,20 @@ def main():
         miri_drop_groups=final_cfg.get('miri_drop_groups'),
         **final_cfg.get('stage1_kwargs', {})
     )
+
+    # Build skip list for Stage 2
+    stage2_steps = ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep', 'WaveCorrStep',
+                    'FlatFieldStep', 'OneOverFStep_int', 'BackgroundStep', 'TracingStep',
+                    'BadPixStep', 'PCAReconstructStep']
+    stage2_skip = []
+    for step in stage2_steps:
+        if final_cfg.get(step) == 'skip':
+            if step == 'OneOverFStep_int':
+                stage2_skip.append('OneOverFStep')
+            else:
+                stage2_skip.append(step)
+
+    fancyprint(f"Stage 2 steps to skip: {stage2_skip}")
 
     # Stage 2
     stage2_results, final_centroids = run_stage2(
@@ -1374,6 +1403,7 @@ def main():
         soss_timeseries_o2=final_cfg.get('soss_timeseries_o2'),
         oof_method=final_cfg.get('oof_method'),
         output_tag=final_cfg['output_tag'],
+        skip_steps=stage2_skip,
         smoothing_scale=final_cfg.get('smoothing_scale'),
         generate_lc=final_cfg.get('generate_lc'),
         soss_inner_mask_width=final_cfg.get('soss_inner_mask_width'),
