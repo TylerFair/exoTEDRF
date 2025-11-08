@@ -189,7 +189,7 @@ def do_box_extraction_nanaware(cube, ypos, width, extract_start=0, extract_end=N
     return f
 
 
-def extract_at_step(datafile, instrument, extract_width, centroids, baseline_ints, output_dir, plot_diagnostic=True):
+def extract_at_step(datafile, instrument, extract_width, centroids, baseline_ints, output_dir, plot_diagnostic=False):
     """
     Extract spectra from a datafile at any pipeline step.
     Note: Errors are NOT returned since they're not needed for optimization.
