@@ -78,21 +78,24 @@ from exotedrf.optimize_helpers import extract_at_step
 
 
 # ======== OUTPUT DIRECTORY DEFINITIONS ========
+# Get base output directory from config, default to 'pipeline_outputs_directory' for backward compatibility
+base_outdir = cfg_early.get('pipeline_outputs_directory', 'pipeline_outputs_directory')
+
 # Define where to store outputs for each pipeline stage
-outdir    = 'pipeline_outputs_directory'         # Main output root
-outdir_f  = 'pipeline_outputs_directory/Files'   # Generic files (tables, logs, etc.)
-outdir_s1 = 'pipeline_outputs_directory/Stage1/' # Stage 1 calibrated data
-outdir_s2 = 'pipeline_outputs_directory/Stage2/' # Stage 2 calibrated data
-outdir_s3 = 'pipeline_outputs_directory/Stage3/' # Stage 3 processed data
-outdir_s4 = 'pipeline_outputs_directory/Stage4/' # Stage 4 final results
+outdir    = base_outdir                          # Main output root
+outdir_f  = f'{base_outdir}/Files'               # Generic files (tables, logs, etc.)
+outdir_s1 = f'{base_outdir}/Stage1/'             # Stage 1 calibrated data
+outdir_s2 = f'{base_outdir}/Stage2/'             # Stage 2 calibrated data
+outdir_s3 = f'{base_outdir}/Stage3/'             # Stage 3 processed data
+outdir_s4 = f'{base_outdir}/Stage4/'             # Stage 4 final results
 
 # Ensure that all required output directories exist (create if missing)
-utils.verify_path('pipeline_outputs_directory')
-utils.verify_path('pipeline_outputs_directory/Files')
-utils.verify_path('pipeline_outputs_directory/Stage1')
-utils.verify_path('pipeline_outputs_directory/Stage2')
-utils.verify_path('pipeline_outputs_directory/Stage3')
-utils.verify_path('pipeline_outputs_directory/Stage4')
+utils.verify_path(base_outdir)
+utils.verify_path(f'{base_outdir}/Files')
+utils.verify_path(f'{base_outdir}/Stage1')
+utils.verify_path(f'{base_outdir}/Stage2')
+utils.verify_path(f'{base_outdir}/Stage3')
+utils.verify_path(f'{base_outdir}/Stage4')
 
 # ======== OBSERVING CONFIG PARAMETERS ========
 # Observation mode in lowercase (e.g., 'niriss', 'nirspec', 'miri')
@@ -147,7 +150,7 @@ def plot_cost(name_str, table_height=0.4):
 
     # ======== LOAD AND CLEAN DATA ========
     # Read cost file for the given run name
-    df = pd.read_csv(f"pipeline_outputs_directory/Files/Cost_{name_str}.txt",
+    df = pd.read_csv(f"{outdir_f}/Cost_{name_str}.txt",
                      delimiter="\t")
 
     # Remove rows where 'cost' is not numeric
@@ -222,13 +225,31 @@ def plot_cost(name_str, table_height=0.4):
 
     df["changed_label"] = labels
 
-    # ======== HIGHLIGHT BEST COST PER SWEEP ========
+    # ======== NORMALIZE COSTS PER SWEEP & HIGHLIGHT BEST ========
     sweep_boundaries = [0] + sweep_lines + [len(df)]
     colors = ['gray'] * len(df)  # default color
+    normalized_costs = np.zeros(len(df))
+
     for i in range(len(sweep_boundaries) - 1):
         start = sweep_boundaries[i]
         end = sweep_boundaries[i+1]
-        # Get index of min cost in this sweep
+
+        # Get costs for this sweep
+        sweep_costs = df.iloc[start:end]["cost"].values
+
+        # Normalize to [0, 1] within this sweep
+        min_cost = sweep_costs.min()
+        max_cost = sweep_costs.max()
+        if max_cost > min_cost:
+            # Scale to [0, 1]: 0 = best (lowest cost), 1 = worst (highest cost)
+            normalized_sweep = (sweep_costs - min_cost) / (max_cost - min_cost)
+        else:
+            # All costs are the same in this sweep
+            normalized_sweep = np.zeros(len(sweep_costs))
+
+        normalized_costs[start:end] = normalized_sweep
+
+        # Highlight the best (minimum cost) in this sweep
         min_idx = df.iloc[start:end]["cost"].idxmin()
         colors[min_idx] = 'green'
 
@@ -250,8 +271,8 @@ def plot_cost(name_str, table_height=0.4):
     ax_plot = fig.add_subplot(gs[0])
     ax_table = fig.add_subplot(gs[1])
 
-    # Scatter plot of cost
-    ax_plot.scatter(range(len(df)), df["cost"].values, color=colors)
+    # Scatter plot of normalized cost
+    ax_plot.scatter(range(len(df)), normalized_costs, color=colors)
     # Vertical dashed lines for sweep boundaries
     for x in sweep_lines:
         ax_plot.axvline(x=x - 0.5, color='gray', linestyle='--', linewidth=1)
@@ -272,8 +293,9 @@ def plot_cost(name_str, table_height=0.4):
         ax_plot.text(center, y_pos, param_name, ha="center", va="top", fontsize=10)
 
     fig.subplots_adjust(bottom=0.30)
-    ax_plot.set_ylabel("Cost (ppm)")
+    ax_plot.set_ylabel("Relative Cost (normalized per sweep)")
     ax_plot.set_title(f"Cost by Single Parameter Sweep: {name_str}")
+    ax_plot.set_ylim(-0.05, 1.05)  # Set y-axis limits since costs are normalized to [0, 1]
 
     # ======== TABLE OF BEST PARAMETERS ========
     ax_table.axis("off")
@@ -293,7 +315,7 @@ def plot_cost(name_str, table_height=0.4):
             cell.set_fontsize(10)  # data
 
     # Save final plot to PNG
-    fig.savefig(f"pipeline_outputs_directory/Files/Cost_{name_str}.png",
+    fig.savefig(f"{outdir_f}/Cost_{name_str}.png",
                 dpi=300, bbox_inches='tight')
 
 # ----------------------------------------
@@ -462,6 +484,15 @@ def cost_function(st3, baseline_ints=None, wave_range=None, w1=0.0, w2=1.0, tol=
         if not finite.any():
             raise ValueError("All entries in wave are NaN!")
 
+        wave_min = np.nanmin(wave[finite])
+        wave_max = np.nanmax(wave[finite])
+
+        # Handle None values (means use data min/max)
+        if lo is None:
+            lo = wave_min
+        if hi is None:
+            hi = wave_max
+
         # Distances from requested range edges
         dist_lo = np.abs(wave - lo); dist_lo[~finite] = np.inf
         dist_hi = np.abs(wave - hi); dist_hi[~finite] = np.inf
@@ -469,9 +500,18 @@ def cost_function(st3, baseline_ints=None, wave_range=None, w1=0.0, w2=1.0, tol=
         idx_lo = int(np.argmin(dist_lo))
         idx_hi = int(np.argmin(dist_hi))
 
-        # Check tolerance
+        # If requested wavelengths not found within tolerance, use closest available
         if dist_lo[idx_lo] > tol or dist_hi[idx_hi] > tol:
-            raise ValueError(f"wave_range {wave_range} not found within ±{tol}")
+            actual_lo = wave[idx_lo]
+            actual_hi = wave[idx_hi]
+
+            # Clip to available range and use closest wavelengths
+            fancyprint(
+                f"Requested wave_range {wave_range} not found within ±{tol} µm tolerance.\n"
+                f"  Available data range: {wave_min:.3f} to {wave_max:.3f} µm\n"
+                f"  Using closest wavelengths: {actual_lo:.3f} to {actual_hi:.3f} µm",
+                msg_type='WARNING'
+            )
 
         # Slice range in correct order
         i0, i1 = sorted((idx_lo, idx_hi))
@@ -717,32 +757,110 @@ def plot_scatter(
         name_map = {h.name.replace(" ", "_"): h
                     for h in hdus if h.data is not None and h.name != "PRIMARY"}
 
-        # Special handling for NIRISS with two orders
+        # Special handling for NIRISS with two orders - plot separately
         if ("Wave_O1" in name_map) and ("Wave_O2" in name_map):
             wave_O1 = np.asarray(name_map["Wave_O1"].data, float)
             wave_O2 = np.asarray(name_map["Wave_O2"].data, float)
-            cutoff = 0.85  # μm: boundary between orders
-            # Select O2 wavelengths <= cutoff
-            i2 = np.where(np.isfinite(wave_O2) & (wave_O2 <= cutoff))[0]
-            # Select O1 wavelengths > cutoff
-            i1 = np.where(np.isfinite(wave_O1) & (wave_O1 > cutoff))[0]
-            if i2.size == 0 or i1.size == 0:
-                raise ValueError(f"Cutoff {cutoff} yields empty segment: "
-                                 f"O2<={i2.size}, O1>{i1.size}")
-            # Concatenate the valid segments
-            wave_full = np.concatenate([wave_O2[:i2[-1]+1], wave_O1[i1[0]:]])
+            is_niriss_two_orders = True
+            # Store both orders separately
+            orders = [
+                {'wave': wave_O2, 'name': 'Order 2'},
+                {'wave': wave_O1, 'name': 'Order 1'}
+            ]
         else:
             # Fallback: read first extension array as wavelength grid
             wave_full = np.asarray(hdus[1].data, float)
+            is_niriss_two_orders = False
 
-    # --- Ensure monotonic wavelength and align scatter columns ---
-    # Sort indices by wavelength, keeping equal values in original order (stable)
+    # --- Plot for NIRISS with two orders (side-by-side subplots) ---
+    if is_niriss_two_orders:
+        fig, axes = plt.subplots(1, 2, figsize=(16, 4))
+
+        col_offset = 0  # Track column offset in scatter data
+        for idx, order_info in enumerate(orders):
+            ax = axes[idx]
+            wave_order = order_info['wave']
+            order_name = order_info['name']
+            n_wave = len(wave_order)
+
+            # Sort wavelengths
+            s = np.argsort(wave_order, kind="mergesort")
+            wave_sorted = wave_order[s]
+
+            # Build mask for wavelength range
+            if wave_range is not None:
+                wmin, wmax = wave_range
+                mask = np.isfinite(wave_sorted) & (wave_sorted >= wmin - tol) & (wave_sorted <= wmax + tol)
+            else:
+                mask = np.isfinite(wave_sorted)
+
+            if not mask.any():
+                fancyprint(f"Warning: No finite wavelengths in {order_name} within range {wave_range}", msg_type='WARNING')
+                col_offset += n_wave
+                continue
+
+            x = wave_sorted[mask]
+
+            # Plot each valid row
+            for i in valid:
+                # Extract data for this order from scatter table
+                y_full = df.iloc[i, col_offset:col_offset+n_wave].to_numpy(float)
+                y_ord = y_full[s]
+                y_raw = (y_ord[mask]) * 1e6
+
+                if style == 'line':
+                    ax.plot(x, y_raw, linewidth=0.6, linestyle='-', alpha=0.5,
+                           color='grey', label="Best config (raw)" if idx == 0 else "")
+                else:
+                    ax.scatter(x, y_raw, s=3, alpha=0.8,
+                              label="Best config (raw)" if idx == 0 else "")
+
+                # Apply smoothing if requested
+                if smooth_window > 1:
+                    y_sm = uniform_filter1d(y_raw, size=smooth_window, mode='nearest')
+                    if style == 'line':
+                        ax.plot(x, y_sm, linewidth=1.2, linestyle='-',
+                               label=f"Best config (smoothed, window={smooth_window})" if idx == 0 else "")
+                    else:
+                        ax.scatter(x, y_sm, s=5,
+                                  label=f"Best config (smoothed, window={smooth_window})" if idx == 0 else "")
+
+            ax.set_xlabel("Wavelength [μm]", fontsize=11)
+            ax.set_ylabel("Scatter [ppm]", fontsize=11)
+            ax.set_title(f"{order_name}", fontsize=12)
+            if ylim is not None:
+                ax.set_ylim(ylim)
+            ax.grid(True, alpha=0.3)
+            if idx == 0:
+                ax.legend(fontsize=8)
+
+            col_offset += n_wave
+
+        plt.tight_layout()
+        if outfile:
+            plt.savefig(outfile, dpi=150, bbox_inches='tight')
+        if show:
+            plt.show()
+        else:
+            plt.close()
+        return
+
+    # --- Plot for single-order instruments ---
+    # Sort wavelengths
     s = np.argsort(wave_full, kind="mergesort")
     wave_sorted = wave_full[s]
 
-    # Wavelength length must match scatter table column count
+    # Check size match
     if wave_sorted.size != n_cols:
-        raise ValueError(f"Wavelength length {wave_sorted.size} != scatter columns {n_cols}")
+        min_size = min(wave_sorted.size, n_cols)
+        fancyprint(
+            f"WARNING: Wavelength array size ({wave_sorted.size}) != scatter columns ({n_cols}).\n"
+            f"  Truncating to {min_size} elements.",
+            msg_type='WARNING'
+        )
+        wave_sorted = wave_sorted[:min_size]
+        s = s[:min_size]
+        n_cols = min_size
 
     # Build boolean mask for desired wavelength range
     if wave_range is not None:
@@ -872,16 +990,9 @@ def main():
     if debug_mode:
         fancyprint("DEBUG MODE ENABLED: Will use cached results (force_redo=False) for all stages", msg_type='WARNING')
 
-    # Set default wave ranges by instrument
-    if wave_range is None:
-        if 'nrs1' in filter_det:
-            wave_range = (2.9, 5.0)
-        elif 'niriss' in obs:
-            wave_range = (0.6, 2.8)
-        elif 'miri' in obs:
-            wave_range = (5, 12)
-        else:
-            wave_range = None
+    # Default behavior: use all available wavelengths (wave_range = None)
+    # Users can explicitly set wave_range in the config if they want to filter specific ranges
+    # This avoids crashes due to hardcoded ranges not matching actual data coverage
 
     if wave_range_plot is None:
         wave_range_plot = wave_range
@@ -921,9 +1032,11 @@ def main():
                     if not isinstance(vals, list):
                         raise ValueError(f"{param_name} must be list when optimize_{param_name}=True")
                     fancyprint(f"Will optimize: {param_name} in Phase 2 over {vals} (using spectral scatter cost)")
+                    # Add to param_ranges so it shows up in logs and plots
+                    param_ranges[param_name] = vals
                 else:
                     fixed_params[param_name] = cfg[param_name]
-                continue  # Don't add to param_ranges for Phase 1
+                continue  # Skip the normal processing below
 
             if v:  # true = optimize (sweep)
                 vals = cfg[param_name]
@@ -1116,6 +1229,7 @@ def main():
                         centroids=run_cfg.get('centroids'),
                         hot_pixel_map=run_cfg.get('hot_pixel_map'),
                         miri_drop_groups=run_cfg.get('miri_drop_groups'),
+                        pipeline_outputs_directory=base_outdir,
                         **s1_kwargs
                     )
 
@@ -1161,6 +1275,7 @@ def main():
                         centroids=run_cfg.get('centroids'),
                         hot_pixel_map=run_cfg.get('hot_pixel_map'),
                         miri_drop_groups=run_cfg.get('miri_drop_groups'),
+                        pipeline_outputs_directory=base_outdir,
                         **run_cfg.get('stage1_kwargs', {})
                     )
 
@@ -1219,6 +1334,7 @@ def main():
                         miri_trace_width=run_cfg.get('miri_trace_width'),
                         miri_background_width=run_cfg.get('miri_background_width'),
                         miri_background_method=run_cfg.get('miri_background_method'),
+                        pipeline_outputs_directory=base_outdir,
                         **s2_kwargs
                     )
 
@@ -1266,6 +1382,7 @@ def main():
                         centroids=run_cfg.get('centroids'),
                         hot_pixel_map=run_cfg.get('hot_pixel_map'),
                         miri_drop_groups=run_cfg.get('miri_drop_groups'),
+                        pipeline_outputs_directory=base_outdir,
                         **run_cfg.get('stage1_kwargs', {})
                     )
 
@@ -1310,6 +1427,7 @@ def main():
                         miri_trace_width=run_cfg.get('miri_trace_width'),
                         miri_background_width=run_cfg.get('miri_background_width'),
                         miri_background_method=run_cfg.get('miri_background_method'),
+                        pipeline_outputs_directory=base_outdir,
                         **run_cfg.get('stage2_kwargs', {})
                     )
 
@@ -1431,6 +1549,7 @@ def main():
         centroids=final_cfg.get('centroids'),
         hot_pixel_map=final_cfg.get('hot_pixel_map'),
         miri_drop_groups=final_cfg.get('miri_drop_groups'),
+        pipeline_outputs_directory=base_outdir,
         **final_cfg.get('stage1_kwargs', {})
     )
 
@@ -1478,6 +1597,7 @@ def main():
         miri_trace_width=final_cfg.get('miri_trace_width'),
         miri_background_width=final_cfg.get('miri_background_width'),
         miri_background_method=final_cfg.get('miri_background_method'),
+        pipeline_outputs_directory=base_outdir,
         **final_cfg.get('stage2_kwargs', {})
     )
 
@@ -1499,6 +1619,10 @@ def main():
 
         extract_costs = []
 
+        # Reopen log files to append extract_width optimization results
+        logf = open(f"{outdir_f}/Cost_{name_str}.txt", "a")
+        logs = open(f"{outdir_f}/Scatter_{name_str}.txt", "a")
+
         for width in extract_widths:
             fancyprint(f"\nTesting extract_width={width}")
             t0 = time.perf_counter()
@@ -1518,6 +1642,7 @@ def main():
                 planet_letter=final_cfg.get('planet_letter'),
                 output_tag=final_cfg['output_tag'],
                 do_plot=final_cfg.get('do_plots', False),
+                pipeline_outputs_directory=base_outdir,
                 **final_cfg.get('stage3_kwargs', {})
             )
 
@@ -1535,16 +1660,36 @@ def main():
 
             fancyprint(f"extract_width={width}: cost={cost:.12f} ({dt:.1f}s)")
 
+            # Log results to files (same format as Phase 1)
+            # Create a temporary config with this extract_width for logging
+            log_cfg = current_best.copy()
+            log_cfg['extract_width'] = width
+            log_line = "\t".join(str(log_cfg.get(p, '')) for p in param_ranges.keys())
+            logf.write(f"{log_line}\t{dt:.1f}\t{cost:.12f}\n")
+            logf.flush()
+
+            scatter_line = " ".join(f"{x:.10g}" for x in scatter)
+            logs.write(f"{scatter_line}\n")
+            logs.flush()
+
         # Select best extract_width
         best_width_idx = np.argmin(extract_costs)
         best_extract_width = extract_widths[best_width_idx]
         best_extract_cost = extract_costs[best_width_idx]
+
+        # Close log files
+        logf.close()
+        logs.close()
 
         fancyprint(f"\n*** Best extract_width={best_extract_width} with cost={best_extract_cost:.6f} ***\n")
 
         # Update final config and run one more time with best width
         final_cfg['extract_width'] = best_extract_width
         current_best['extract_width'] = best_extract_width
+
+        # Regenerate plot with extract_width optimization results
+        fancyprint("\n=== Updating optimization plot with extract_width results ===")
+        plot_cost(name_str)
 
         # Final Stage 3 with optimal width
         stage3_results = run_stage3(
@@ -1561,6 +1706,7 @@ def main():
             planet_letter=final_cfg.get('planet_letter'),
             output_tag=final_cfg['output_tag'],
             do_plot=final_cfg.get('do_plots', False),
+            pipeline_outputs_directory=base_outdir,
             **final_cfg.get('stage3_kwargs', {})
         )
     else:
@@ -1605,6 +1751,62 @@ def main():
         style="line",
         save_path=os.path.join(outdir_f, f"Scatter_Plot_{name_str}.png"),
     )
+
+    # ===== ARCHIVE TO LONG-TERM STORAGE =====
+    archive_dest = cfg.get('archive_to_longterm_storage')
+    if archive_dest and archive_dest not in [None, 'None', 'null', '']:
+        fancyprint(f"\n{'='*60}")
+        fancyprint("ARCHIVING TO LONG-TERM STORAGE")
+        fancyprint(f"{'='*60}\n")
+
+        import shutil
+
+        # Construct full output directory path (base_outdir + output_tag)
+        if cfg['output_tag'] != '':
+            output_tag_full = '_' + cfg['output_tag']
+        else:
+            output_tag_full = ''
+        full_output_dir = base_outdir + output_tag_full
+
+        # Get input directory
+        input_dir = cfg['input_dir']
+
+        # Create archive destination if it doesn't exist
+        os.makedirs(archive_dest, exist_ok=True)
+
+        # Archive input directory
+        if os.path.exists(input_dir):
+            input_basename = os.path.basename(input_dir.rstrip('/'))
+            archive_input = os.path.join(archive_dest, input_basename)
+            try:
+                fancyprint(f"Moving input data:")
+                fancyprint(f"  From: {input_dir}")
+                fancyprint(f"  To:   {archive_input}")
+                shutil.move(input_dir, archive_input)
+                fancyprint("  ✓ Input data archived successfully")
+            except Exception as e:
+                fancyprint(f"  ✗ Failed to archive input data: {e}", msg_type='WARNING')
+        else:
+            fancyprint(f"Input directory not found (already moved?): {input_dir}", msg_type='WARNING')
+
+        # Archive output directory
+        if os.path.exists(full_output_dir):
+            output_basename = os.path.basename(full_output_dir.rstrip('/'))
+            archive_output = os.path.join(archive_dest, output_basename)
+            try:
+                fancyprint(f"\nMoving pipeline outputs:")
+                fancyprint(f"  From: {full_output_dir}")
+                fancyprint(f"  To:   {archive_output}")
+                shutil.move(full_output_dir, archive_output)
+                fancyprint("  ✓ Pipeline outputs archived successfully")
+            except Exception as e:
+                fancyprint(f"  ✗ Failed to archive outputs: {e}", msg_type='WARNING')
+        else:
+            fancyprint(f"Output directory not found: {full_output_dir}", msg_type='WARNING')
+
+        fancyprint(f"\n{'='*60}")
+        fancyprint("ARCHIVING COMPLETE")
+        fancyprint(f"{'='*60}\n")
 
     #  timing
     t1 = time.perf_counter() - t0_total
