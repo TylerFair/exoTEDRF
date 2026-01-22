@@ -13,7 +13,7 @@ import os
 
 from exotedrf import utils
 from exotedrf.utils import fancyprint
-from exotedrf.stage3 import get_wave_nirspec, get_wave_soss, get_wave_miri
+from exotedrf.stage3 import get_wave_soss
 import matplotlib.pyplot as plt
 
 
@@ -447,7 +447,10 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
             width=extract_width, extract_start=int(np.min(y1)), extract_end=int(np.max(y1))
         )
 
-        wave = get_wave_miri(datafile, centroids, cube.shape[0], cube.shape[1])
+        # For optimizer, use pixel indices as placeholder wavelengths (no calibration needed)
+        # This is sufficient for cost function evaluation
+        wave = np.arange(flux.shape[1]).astype(float)
+        wave = np.repeat(wave[np.newaxis, :], flux.shape[0], axis=0)
 
         # Diagnostic plots (MIRI is rotated, so plot transpose)
         if plot_diagnostic:
@@ -509,3 +512,5 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
 
     else:
         raise ValueError(f"Unknown instrument: {instrument}")
+
+
