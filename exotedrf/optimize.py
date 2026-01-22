@@ -565,9 +565,9 @@ def diagnostic_plot(st3, name_str, baseline_ints, outdir=outdir_f):
         wave_min, wave_max = 0.6, 2.8
     elif 'nirspec' in obs_early:
         if filter_early == 'nrs1':
-            wave_min, wave_max = 2.9, None
+            wave_min, wave_max = 2.9, 3.9  # NRS1 covers lower wavelengths (~2.9-3.8 µm)
         elif filter_early == 'nrs2':
-            wave_min, wave_max = None, 2.9
+            wave_min, wave_max = 3.8, 5.0  # NRS2 covers higher wavelengths (~3.8-5.2 µm)
         else:
             raise ValueError(f"Unknown nirspec filter_detector: {filter_early}")
     else:
@@ -650,11 +650,10 @@ def diagnostic_plot(st3, name_str, baseline_ints, outdir=outdir_f):
 
     # --- Plot normalized white-light curve ---
     plt.figure()
-    plt.plot(norm_white, marker='.')
+    plt.plot(norm_white, 'k.', markersize=2, alpha=0.5)
     plt.xlabel("Integration Number")
     plt.ylabel("Normalized White Flux")
     plt.title("Normalized White-light Curve")
-    plt.grid(True)
     plt.savefig(f"{outdir}/norm_white_{name_str}.png", dpi=300)
     plt.close()
 
@@ -665,9 +664,15 @@ def diagnostic_plot(st3, name_str, baseline_ints, outdir=outdir_f):
 
     n_int, n_pix = img.shape
 
+    # Check if wavelength array is empty (can happen with bad extractions)
+    if wave.size == 0 or n_pix == 0:
+        fancyprint("WARNING: Wavelength array is empty, skipping diagnostic flux image plot", msg_type='WARNING')
+        return
+
     # Require strictly increasing wavelength for pcolormesh bin edges
     if not np.all(np.diff(wave) > 0):
-        raise ValueError("wave must be strictly increasing for pcolormesh")
+        fancyprint("WARNING: Wavelength not strictly increasing, skipping diagnostic flux image plot", msg_type='WARNING')
+        return
 
     # Compute wavelength bin edges for pcolormesh
     dw = np.diff(wave)
@@ -816,14 +821,14 @@ def plot_scatter(
                               label="Best config (raw)" if idx == 0 else "")
 
                 # Apply smoothing if requested
-                if smooth_window > 1:
-                    y_sm = uniform_filter1d(y_raw, size=smooth_window, mode='nearest')
+                if smooth and smooth > 1:
+                    y_sm = uniform_filter1d(y_raw, size=smooth, mode='nearest')
                     if style == 'line':
                         ax.plot(x, y_sm, linewidth=1.2, linestyle='-',
-                               label=f"Best config (smoothed, window={smooth_window})" if idx == 0 else "")
+                               label=f"Best config (smoothed, window={smooth})" if idx == 0 else "")
                     else:
                         ax.scatter(x, y_sm, s=5,
-                                  label=f"Best config (smoothed, window={smooth_window})" if idx == 0 else "")
+                                  label=f"Best config (smoothed, window={smooth})" if idx == 0 else "")
 
             ax.set_xlabel("Wavelength [μm]", fontsize=11)
             ax.set_ylabel("Scatter [ppm]", fontsize=11)
@@ -998,7 +1003,199 @@ def main():
         wave_range_plot = wave_range
 
     t0_total = time.perf_counter()
+        # ===== CHECK FOR EXTRACT WIDTH ONLY MODE =====
+    optimize_extract_width_only = cfg.get('optimize_extract_width_only', False)
 
+    if optimize_extract_width_only:
+        fancyprint(f"\n{'='*60}")
+        fancyprint("EXTRACT WIDTH ONLY MODE ENABLED")
+        fancyprint("Skipping Phase 1 - Loading existing Stage 2 outputs")
+        fancyprint(f"{'='*60}\n")
+
+        # Verify that only extract_width is set to optimize
+        optimize_flags = [k for k in cfg.keys() if k.startswith('optimize_') and k != 'optimize_extract_width_only']
+        for flag in optimize_flags:
+            if flag == 'optimize_extract_width':
+                if not cfg[flag]:
+                    raise ValueError("optimize_extract_width must be True when optimize_extract_width_only=True")
+            else:
+                if cfg[flag]:
+                    raise ValueError(f"{flag} must be False when optimize_extract_width_only=True. Only extract_width can be optimized in this mode.")
+
+        # Look for existing Stage 2 outputs
+        fancyprint("Looking for existing Stage 2 outputs...")
+
+        # Priority order for Stage 2 output files
+        stage2_patterns = [
+            f'{outdir_s2}*_pcareconstructstep.fits',
+            f'{outdir_s2}*_badpixstep.fits',
+        ]
+
+        stage2_files = None
+        for pattern in stage2_patterns:
+            found_files = sorted(glob.glob(pattern))
+            if found_files:
+                stage2_files = found_files
+                fancyprint(f"  Found {len(found_files)} file(s) matching: {pattern}")
+                break
+
+        if stage2_files is None:
+            raise FileNotFoundError(
+                f"No Stage 2 outputs found in {outdir_s2}. "
+                "Please run the full pipeline first before using optimize_extract_width_only mode."
+            )
+
+        # Look for centroids file
+        fancyprint("Looking for centroids file...")
+        centroid_files = sorted(glob.glob(f'{outdir_s2}*centroids.csv'))
+
+        if centroid_files:
+            centroid_file = centroid_files[0]
+            fancyprint(f"  Loading centroids from: {centroid_file}")
+            centroids_df = pd.read_csv(centroid_file, comment='#')
+        elif cfg.get('centroids') is not None:
+            fancyprint(f"  Using centroids from config: {cfg.get('centroids')}")
+            centroids_path = cfg.get('centroids')
+            if isinstance(centroids_path, str):
+                centroids_df = pd.read_csv(centroids_path, comment='#')
+            else:
+                centroids_df = centroids_path
+        else:
+            raise FileNotFoundError(
+                f"No centroids file found in {outdir_s2} and no 'centroids' specified in config. "
+                "Please ensure centroids are available before using optimize_extract_width_only mode."
+            )
+
+        # Setup for extract width optimization
+        extract_widths = cfg['extract_width']
+        if not isinstance(extract_widths, list):
+            raise ValueError("extract_width must be a list when optimize_extract_width=True")
+
+        fancyprint(f"\nWill optimize extract_width over: {extract_widths}")
+        fancyprint(f"Using Stage 2 outputs: {stage2_files}")
+
+        # Initialize logs
+        logf = open(f"{outdir_f}/Cost_{name_str}.txt", "a")
+        logs = open(f"{outdir_f}/Scatter_{name_str}.txt", "a")
+
+        extract_costs = []
+
+        # Run extract width optimization loop
+        for width in extract_widths:
+            fancyprint(f"\n{'='*60}")
+            fancyprint(f"Testing extract_width={width}")
+            fancyprint(f"{'='*60}\n")
+            t0 = time.perf_counter()
+
+            # Run Stage 3 with this extract width
+            stage3_results = run_stage3(
+                stage2_files,
+                save_results=True,
+                force_redo=True,
+                extract_method=cfg['extract_method'],
+                soss_specprofile=cfg.get('soss_specprofile'),
+                centroids=centroids_df,
+                extract_width=width,
+                st_teff=cfg.get('st_teff'),
+                st_logg=cfg.get('st_logg'),
+                st_met=cfg.get('st_met'),
+                planet_letter=cfg.get('planet_letter'),
+                output_tag=cfg['output_tag'],
+                do_plot=cfg.get('do_plots', False),
+                pipeline_outputs_directory=base_outdir,
+                **cfg.get('stage3_kwargs', {})
+            )
+
+            # Compute cost
+            cost, scatter = cost_function(
+                stage3_results,
+                baseline_ints=baseline_ints,
+                wave_range=wave_range,
+                w1=w1,
+                w2=w2
+            )
+
+            dt = time.perf_counter() - t0
+            extract_costs.append(cost)
+
+            fancyprint(f"extract_width={width}: cost={cost:.12f} ({dt:.1f}s)")
+
+            # Log results
+            logf.write(f"{width}\t{dt:.1f}\t{cost:.12f}\n")
+            logf.flush()
+
+            scatter_line = " ".join(f"{x:.10g}" for x in scatter)
+            logs.write(f"{scatter_line}\n")
+            logs.flush()
+
+        # Select best extract_width
+        best_width_idx = np.argmin(extract_costs)
+        best_extract_width = extract_widths[best_width_idx]
+        best_extract_cost = extract_costs[best_width_idx]
+
+        logf.close()
+        logs.close()
+
+        fancyprint(f"\n{'='*60}")
+        fancyprint(f"BEST EXTRACT_WIDTH: {best_extract_width}")
+        fancyprint(f"BEST COST: {best_extract_cost:.12f}")
+        fancyprint(f"{'='*60}\n")
+
+        # Generate plots
+        fancyprint("Generating optimization plots...")
+        plot_cost(name_str)
+
+        # Run final Stage 3 with best width
+        fancyprint(f"\nRunning final Stage 3 with optimal extract_width={best_extract_width}...")
+        stage3_results = run_stage3(
+            stage2_files,
+            save_results=True,
+            force_redo=True,
+            extract_method=cfg['extract_method'],
+            soss_specprofile=cfg.get('soss_specprofile'),
+            centroids=centroids_df,
+            extract_width=best_extract_width,
+            st_teff=cfg.get('st_teff'),
+            st_logg=cfg.get('st_logg'),
+            st_met=cfg.get('st_met'),
+            planet_letter=cfg.get('planet_letter'),
+            output_tag=cfg['output_tag'],
+            do_plot=cfg.get('do_plots', False),
+            pipeline_outputs_directory=base_outdir,
+            **cfg.get('stage3_kwargs', {})
+        )
+
+        # Generate diagnostic plots
+        diagnostic_plot(stage3_results, name_str, baseline_ints=baseline_ints, outdir=outdir_f)
+
+        # Generate scatter plot
+        outfile = os.path.join(outdir_f, f"Scatter_{name_str}.txt")
+        specfile = glob.glob(os.path.join(outdir_s3, "*_box_spectra_fullres.fits"))[0]
+        best_idx = pd.read_csv(os.path.join(outdir_f, f"Cost_{name_str}.txt"), sep="\t")['cost'].idxmin()
+
+        plot_scatter(
+            txtfile=outfile,
+            rows=[best_idx],
+            wave_range=wave_range_plot,
+            smooth=10,
+            spectrum_files=[specfile],
+            ylim=ylim_plot,
+            style="line",
+            save_path=os.path.join(outdir_f, f"Scatter_Plot_{name_str}.png"),
+        )
+
+        # Print final timing
+        t1 = time.perf_counter() - t0_total
+        h, m = divmod(int(t1), 3600)
+        m, s = divmod(m, 60)
+        fancyprint(f"\n{'='*60}")
+        fancyprint(f"TOTAL RUNTIME: {h}h {m:02d}min {s:02d}s")
+        fancyprint(f"OPTIMAL EXTRACT_WIDTH: {best_extract_width}")
+        fancyprint(f"{'='*60}\n")
+
+        return  # Exit early - we're done!
+
+    # ===== NORMAL MODE: FULL OPTIMIZATION =====
     # Load input files
     input_files = unpack_input_dir(
         cfg["input_dir"],
@@ -1771,8 +1968,8 @@ def main():
         # Get input directory
         input_dir = cfg['input_dir']
 
-        # Create archive destination if it doesn't exist
-        os.makedirs(archive_dest, exist_ok=True)
+        # Trust that archive_dest exists (don't try to create parent dirs like /cds2)
+        # User must ensure the archive destination directory exists before running
 
         # Archive input directory
         if os.path.exists(input_dir):
@@ -1819,3 +2016,4 @@ def main():
 
 if __name__ == "__main__":
     main() 
+
