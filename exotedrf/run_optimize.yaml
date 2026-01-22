@@ -7,7 +7,8 @@
 crds_cache_path : './crds_cache/'
 crds_context: 'jwst_1322.pmap'
 # Input data file directory.
-input_dir : './DMS_uncal/'
+input_dir : '<path_to_main_things>'
+pipeline_outputs_directory : '<path_to_output_files>'
 # Input file tag.
 input_filetag : 'uncal'
 # Instrument mode used; e.g., 'NIRISS/SOSS', 'NIRSpec/G395H', 'MIRI/LRS'.
@@ -15,7 +16,7 @@ observing_mode : 'NIRISS/SOSS'
 # Type of filter or detector used. For SOSS, either 'CLEAR' or 'F277W'. For NIRSpec, either 'NRS1' or 'NRS2'.
 filter_detector :  'CLEAR'
 # Naming of the output files
-name_tag : 'HAT-P-18b_NIRISS'
+name_tag : ''
 
 # ===== Stage 1 Input Files & Parameters =====
 # List of stage 1 steps to run or skip.
@@ -89,7 +90,7 @@ smoothing_scale : None
 generate_order0_mask : True
 # (SOSS only) Path to a processed (superbias and background subtracted) F277W exposure data frame (optional). Only
 # necessary if generate_order0_mask is True.
-f277w : './'
+f277w : None
 # DMS Stage 2 kwargs. Format should be: {'step_name': {'kwd': value}}.
 stage2_kwargs : {}
 
@@ -115,9 +116,9 @@ output_tag : ''
 # Integrations of ingress and/or egress.
 baseline_ints : [50]
 # File with trace centroids for box extraction and 1/f correction (optional).
-centroids : None
+centroids : None 
 # If True, make more diagnostic plots.
-do_plots : False
+do_plots : True
 
 # ===== Optimize =====
 wave_range : null # Wave range in μm where the cost function should be evaluated.
