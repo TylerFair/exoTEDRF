@@ -66,6 +66,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 from astropy.io import fits
+from scipy.ndimage import uniform_filter1d
 
 # --------------------------------------------------------
 # 4) ADDITIONAL PROJECT IMPORTS
@@ -112,9 +113,9 @@ w2 = cfg_early.get('w2', 1.0)
 # ======== INSTRUMENT WAVELENGTH LIMITS ========
 # Allowed wavelength coverage for each instrument (microns)
 bands = {
-    'miri':    (5.0, 13.0),
+    'miri':    (5.0, 12.0),
     'nirspec': (1.0, 5.0),
-    'niriss':  (1.0, 2.8)
+    'niriss':  (0.6, 2.8)
 }
 
 # ======== VALIDATION: CHECK WAVELENGTH RANGE AGAINST INSTRUMENT LIMITS ========
@@ -151,7 +152,7 @@ def plot_cost(name_str, table_height=0.4):
     # ======== LOAD AND CLEAN DATA ========
     # Read cost file for the given run name
     df = pd.read_csv(f"{outdir_f}/Cost_{name_str}.txt",
-                     delimiter="\t")
+                     delimiter="\t", keep_default_na=False)
 
     # Remove rows where 'cost' is not numeric
     df = df[pd.to_numeric(df["cost"], errors="coerce").notna()].reset_index(drop=True)
@@ -445,6 +446,19 @@ def cost_function(st3, baseline_ints=None, wave_range=None, w1=0.0, w2=1.0, tol=
         # For non-NIRISS: take flux/wave arrays directly
         flux = np.asarray(st3['Flux'], float)
         wave = np.asarray(st3['Wave'], float)
+        if wave.ndim == 2:
+            # MIRI/NIRSpec Stage 3 outputs store the same wavelength grid for each integration.
+            if wave.shape == flux.shape:
+                wave = np.nanmedian(wave, axis=0)
+            elif 1 in wave.shape:
+                wave = np.ravel(wave)
+            else:
+                raise ValueError(
+                    f"Expected 1D wavelength axis or 2D array matching flux; got wave.shape={wave.shape} "
+                    f"and flux.shape={flux.shape}"
+                )
+        elif wave.ndim != 1:
+            raise ValueError(f"Expected 1D wavelength axis, got wave.ndim={wave.ndim}")
 
     # ======== WHITE-LIGHT TERM ========
     # Collapse all wavelengths into single white-light curve
@@ -842,12 +856,9 @@ def plot_scatter(
             col_offset += n_wave
 
         plt.tight_layout()
-        if outfile:
-            plt.savefig(outfile, dpi=150, bbox_inches='tight')
-        if show:
-            plt.show()
-        else:
-            plt.close()
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
         return
 
     # --- Plot for single-order instruments ---
@@ -965,6 +976,254 @@ def get_stage_skips(cfg, steps, always_skip=None, special_one_over_f=False):
     return list(skips)
 
 
+def format_log_value(value):
+    """Format optimizer values for TSV logging."""
+
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    if isinstance(value, (list, tuple)):
+        return '[' + ','.join(str(v) for v in value) + ']'
+    if value is None:
+        return 'None'
+    if pd.isna(value):
+        return ''
+    return str(value)
+
+
+def prepare_cost_log(name_str, required_param_cols):
+    """Ensure the cost log exists and can store the requested parameter columns."""
+
+    cost_path = f"{outdir_f}/Cost_{name_str}.txt"
+    if os.path.exists(cost_path) and os.path.getsize(cost_path) > 0:
+        df = pd.read_csv(cost_path, sep='\t', keep_default_na=False)
+    else:
+        df = pd.DataFrame()
+
+    existing_param_cols = [c for c in df.columns if c not in ['duration_s', 'cost']]
+    param_cols = existing_param_cols.copy()
+    for col in required_param_cols:
+        if col not in param_cols:
+            param_cols.append(col)
+
+    if df.empty:
+        df = pd.DataFrame(columns=param_cols + ['duration_s', 'cost'])
+    else:
+        for col in param_cols:
+            if col not in df.columns:
+                df[col] = ''
+        for col in ['duration_s', 'cost']:
+            if col not in df.columns:
+                df[col] = ''
+        df = df[param_cols + ['duration_s', 'cost']]
+
+    df.to_csv(cost_path, sep='\t', index=False)
+
+    best_logged = {}
+    if len(df) > 0:
+        numeric_cost = pd.to_numeric(df['cost'], errors='coerce')
+        if numeric_cost.notna().any():
+            best_logged = df.loc[numeric_cost.idxmin(), param_cols].to_dict()
+
+    return cost_path, param_cols, len(df), best_logged
+
+
+def append_cost_log_row(cost_path, param_cols, row_values, duration_s, cost):
+    """Append one optimizer result row to the cost log."""
+
+    fields = [format_log_value(row_values.get(col, '')) for col in param_cols]
+    fields.extend([f"{duration_s:.1f}", f"{cost:.12f}"])
+    with open(cost_path, 'a') as logf:
+        logf.write('\t'.join(fields) + '\n')
+
+
+def append_scatter_log_row(name_str, scatter):
+    """Append one scatter spectrum row to the scatter log."""
+
+    scatter_path = f"{outdir_f}/Scatter_{name_str}.txt"
+    with open(scatter_path, 'a') as logs:
+        logs.write(' '.join(f"{x:.10g}" for x in scatter) + '\n')
+    return scatter_path
+
+
+def load_ad_hoc_centroids(cfg):
+    """Load centroids from existing Stage 2 outputs or the config."""
+
+    centroid_files = sorted(glob.glob(f'{outdir_s2}*centroids.csv'))
+    if centroid_files:
+        centroid_file = centroid_files[0]
+        fancyprint(f"  Loading centroids from: {centroid_file}")
+        return pd.read_csv(centroid_file, comment='#')
+
+    centroids_path = cfg.get('centroids')
+    if centroids_path is None:
+        raise FileNotFoundError(
+            f"No centroids file found in {outdir_s2} and no 'centroids' specified in config."
+        )
+    fancyprint(f"  Using centroids from config: {centroids_path}")
+    if isinstance(centroids_path, str):
+        return pd.read_csv(centroids_path, comment='#')
+    return centroids_path
+
+
+def resolve_stage3_centroids(cfg):
+    """Resolve the centroid table for Stage 3 extraction."""
+
+    centroids_path = cfg.get('centroids')
+    if centroids_path not in [None, 'None', 'null', '']:
+        fancyprint(f"  Using centroids from config: {centroids_path}")
+        if isinstance(centroids_path, str):
+            return pd.read_csv(centroids_path, comment='#')
+        return centroids_path
+
+    centroid_files = sorted(glob.glob(f'{outdir_s2}*centroids.csv'))
+    if centroid_files:
+        fancyprint(f"  Loading centroids from: {centroid_files[0]}")
+        return pd.read_csv(centroid_files[0], comment='#')
+
+    raise FileNotFoundError(
+        "No centroid table available for Stage 3. Set 'centroids' in the config or provide "
+        "a Stage 2 centroids.csv output."
+    )
+
+
+def unpack_stage2_aux(stage2_aux):
+    """Interpret the auxiliary object returned by Stage 2 as centroids or a deepframe."""
+
+    centroids = None
+    deepframe = None
+
+    if isinstance(stage2_aux, np.ndarray):
+        centroids = pd.DataFrame(stage2_aux.T, columns=["xpos", "ypos"])
+    elif isinstance(stage2_aux, pd.DataFrame):
+        centroids = stage2_aux
+    elif isinstance(stage2_aux, str):
+        if stage2_aux.endswith('centroids.csv'):
+            centroids = pd.read_csv(stage2_aux, comment='#')
+        elif stage2_aux.endswith('deepframe.fits'):
+            deepframe = stage2_aux
+
+    return centroids, deepframe
+
+
+def find_existing_stage2_outputs(patterns, error_message):
+    """Return the first matching set of Stage 2 files from a list of glob patterns."""
+
+    for pattern in patterns:
+        found_files = sorted(glob.glob(pattern))
+        if found_files:
+            fancyprint(f"  Found {len(found_files)} file(s) matching: {pattern}")
+            return found_files
+    raise FileNotFoundError(error_message)
+
+
+def resolve_ad_hoc_deepframe(cfg):
+    """Resolve the deepframe path for ad hoc Stage 3 runs."""
+
+    deepframe = cfg.get('deepframe')
+    if deepframe not in [None, 'None', 'null', '']:
+        return deepframe
+
+    deepframe_files = sorted(glob.glob(f'{outdir_s2}*deepframe.fits'))
+    if deepframe_files:
+        fancyprint(f"  Using deepframe from: {deepframe_files[0]}")
+        return deepframe_files[0]
+
+    return None
+
+
+def run_stage3_for_width(stage2_inputs, cfg, centroids, deepframe, extract_width):
+    """Run Stage 3 once for a specific extraction width."""
+
+    return run_stage3(
+        stage2_inputs,
+        save_results=True,
+        force_redo=True,
+        extract_method=cfg['extract_method'],
+        soss_specprofile=cfg.get('soss_specprofile'),
+        centroids=centroids,
+        extract_width=extract_width,
+        st_teff=cfg.get('st_teff'),
+        st_logg=cfg.get('st_logg'),
+        st_met=cfg.get('st_met'),
+        planet_letter=cfg.get('planet_letter'),
+        output_tag=cfg['output_tag'],
+        do_plot=cfg.get('do_plots', False),
+        deepframe=deepframe,
+        pipeline_outputs_directory=base_outdir,
+        **cfg.get('stage3_kwargs', {})
+    )
+
+
+def run_ad_hoc_extract_width_search(stage2_inputs, cfg, centroids, deepframe, baseline_ints,
+                                    wave_range, w1, w2, name_str, base_row_values):
+    """Append an ad hoc Stage 3 extraction sweep to the optimizer logs."""
+
+    if cfg.get('optimize_extract_width', False):
+        extract_widths = cfg['extract_width']
+        if not isinstance(extract_widths, list):
+            raise ValueError("extract_width must be a list when optimize_extract_width=True")
+    else:
+        extract_widths = cfg.get('extract_width')
+        if isinstance(extract_widths, list):
+            extract_widths = [extract_widths[0]]
+        else:
+            extract_widths = [extract_widths]
+
+    required_cols = ['ad_hoc_mode', 'remove_components']
+    if 'extract_width' not in required_cols:
+        required_cols.append('extract_width')
+    cost_path, param_cols, row_offset, best_logged = prepare_cost_log(name_str, required_cols)
+    if best_logged:
+        merged_row_values = best_logged.copy()
+        merged_row_values.update(base_row_values)
+    else:
+        merged_row_values = base_row_values.copy()
+
+    extract_costs = []
+    appended_rows = []
+    best_stage3_results = None
+
+    for idx, width in enumerate(extract_widths):
+        fancyprint(f"\n{'='*60}")
+        fancyprint(f"Testing extract_width={width}")
+        fancyprint(f"{'='*60}\n")
+        t0 = time.perf_counter()
+
+        stage3_results = run_stage3_for_width(stage2_inputs, cfg, centroids, deepframe, width)
+        cost, scatter = cost_function(
+            stage3_results,
+            baseline_ints=baseline_ints,
+            wave_range=wave_range,
+            w1=w1,
+            w2=w2
+        )
+
+        dt = time.perf_counter() - t0
+        extract_costs.append(cost)
+        appended_rows.append(row_offset + idx)
+        this_row = merged_row_values.copy()
+        this_row['extract_width'] = width
+        append_cost_log_row(cost_path, param_cols, this_row, dt, cost)
+        append_scatter_log_row(name_str, scatter)
+
+        fancyprint(f"extract_width={width}: cost={cost:.12f} ({dt:.1f}s)")
+
+        if best_stage3_results is None or cost <= np.nanmin(extract_costs):
+            best_stage3_results = stage3_results
+
+    best_idx = int(np.argmin(extract_costs))
+    best_extract_width = extract_widths[best_idx]
+    best_cost = extract_costs[best_idx]
+    best_row_idx = appended_rows[best_idx]
+
+    fancyprint(f"\n*** Best extract_width={best_extract_width} with cost={best_cost:.6f} ***\n")
+
+    final_stage3_results = run_stage3_for_width(stage2_inputs, cfg, centroids, deepframe,
+                                                best_extract_width)
+
+    return final_stage3_results, best_extract_width, best_cost, best_row_idx
+
+
 
 
 # ----------------------------------------
@@ -1003,179 +1262,67 @@ def main():
         wave_range_plot = wave_range
 
     t0_total = time.perf_counter()
-        # ===== CHECK FOR EXTRACT WIDTH ONLY MODE =====
     optimize_extract_width_only = cfg.get('optimize_extract_width_only', False)
+    from_pca_only = cfg.get('from_pca_only', cfg.get('optimize_from_pca_only', False))
+
+    if optimize_extract_width_only and from_pca_only:
+        raise ValueError("optimize_extract_width_only and from_pca_only cannot both be True.")
 
     if optimize_extract_width_only:
         fancyprint(f"\n{'='*60}")
         fancyprint("EXTRACT WIDTH ONLY MODE ENABLED")
-        fancyprint("Skipping Phase 1 - Loading existing Stage 2 outputs")
+        fancyprint("Skipping directly to Stage 3 using existing Stage 2 outputs")
         fancyprint(f"{'='*60}\n")
 
-        # Verify that only extract_width is set to optimize
-        optimize_flags = [k for k in cfg.keys() if k.startswith('optimize_') and k != 'optimize_extract_width_only']
+        optimize_flags = [
+            k for k in cfg.keys()
+            if k.startswith('optimize_') and k not in ['optimize_extract_width_only',
+                                                       'optimize_from_pca_only']
+        ]
         for flag in optimize_flags:
             if flag == 'optimize_extract_width':
                 if not cfg[flag]:
-                    raise ValueError("optimize_extract_width must be True when optimize_extract_width_only=True")
-            else:
-                if cfg[flag]:
-                    raise ValueError(f"{flag} must be False when optimize_extract_width_only=True. Only extract_width can be optimized in this mode.")
+                    raise ValueError(
+                        "optimize_extract_width must be True when optimize_extract_width_only=True"
+                    )
+            elif cfg[flag]:
+                raise ValueError(
+                    f"{flag} must be False when optimize_extract_width_only=True. "
+                    "Only extract_width can be optimized in this mode."
+                )
 
-        # Look for existing Stage 2 outputs
         fancyprint("Looking for existing Stage 2 outputs...")
-
-        # Priority order for Stage 2 output files
-        stage2_patterns = [
-            f'{outdir_s2}*_pcareconstructstep.fits',
-            f'{outdir_s2}*_badpixstep.fits',
-        ]
-
-        stage2_files = None
-        for pattern in stage2_patterns:
-            found_files = sorted(glob.glob(pattern))
-            if found_files:
-                stage2_files = found_files
-                fancyprint(f"  Found {len(found_files)} file(s) matching: {pattern}")
-                break
-
-        if stage2_files is None:
-            raise FileNotFoundError(
-                f"No Stage 2 outputs found in {outdir_s2}. "
-                "Please run the full pipeline first before using optimize_extract_width_only mode."
-            )
-
-        # Look for centroids file
+        stage2_files = find_existing_stage2_outputs(
+            [
+                f'{outdir_s2}*_pcareconstructstep.fits',
+                f'{outdir_s2}*_badpixstep.fits',
+            ],
+            f"No Stage 2 outputs found in {outdir_s2}. "
+            "Please run the full pipeline first before using optimize_extract_width_only mode."
+        )
         fancyprint("Looking for centroids file...")
-        centroid_files = sorted(glob.glob(f'{outdir_s2}*centroids.csv'))
+        centroids_df = load_ad_hoc_centroids(cfg)
+        deepframe = resolve_ad_hoc_deepframe(cfg)
 
-        if centroid_files:
-            centroid_file = centroid_files[0]
-            fancyprint(f"  Loading centroids from: {centroid_file}")
-            centroids_df = pd.read_csv(centroid_file, comment='#')
-        elif cfg.get('centroids') is not None:
-            fancyprint(f"  Using centroids from config: {cfg.get('centroids')}")
-            centroids_path = cfg.get('centroids')
-            if isinstance(centroids_path, str):
-                centroids_df = pd.read_csv(centroids_path, comment='#')
-            else:
-                centroids_df = centroids_path
-        else:
-            raise FileNotFoundError(
-                f"No centroids file found in {outdir_s2} and no 'centroids' specified in config. "
-                "Please ensure centroids are available before using optimize_extract_width_only mode."
-            )
-
-        # Setup for extract width optimization
-        extract_widths = cfg['extract_width']
-        if not isinstance(extract_widths, list):
-            raise ValueError("extract_width must be a list when optimize_extract_width=True")
-
-        fancyprint(f"\nWill optimize extract_width over: {extract_widths}")
         fancyprint(f"Using Stage 2 outputs: {stage2_files}")
-
-        # Initialize logs
-        logf = open(f"{outdir_f}/Cost_{name_str}.txt", "a")
-        logs = open(f"{outdir_f}/Scatter_{name_str}.txt", "a")
-
-        extract_costs = []
-
-        # Run extract width optimization loop
-        for width in extract_widths:
-            fancyprint(f"\n{'='*60}")
-            fancyprint(f"Testing extract_width={width}")
-            fancyprint(f"{'='*60}\n")
-            t0 = time.perf_counter()
-
-            # Run Stage 3 with this extract width
-            stage3_results = run_stage3(
-                stage2_files,
-                save_results=True,
-                force_redo=True,
-                extract_method=cfg['extract_method'],
-                soss_specprofile=cfg.get('soss_specprofile'),
-                centroids=centroids_df,
-                extract_width=width,
-                st_teff=cfg.get('st_teff'),
-                st_logg=cfg.get('st_logg'),
-                st_met=cfg.get('st_met'),
-                planet_letter=cfg.get('planet_letter'),
-                output_tag=cfg['output_tag'],
-                do_plot=cfg.get('do_plots', False),
-                pipeline_outputs_directory=base_outdir,
-                **cfg.get('stage3_kwargs', {})
-            )
-
-            # Compute cost
-            cost, scatter = cost_function(
-                stage3_results,
-                baseline_ints=baseline_ints,
-                wave_range=wave_range,
-                w1=w1,
-                w2=w2
-            )
-
-            dt = time.perf_counter() - t0
-            extract_costs.append(cost)
-
-            fancyprint(f"extract_width={width}: cost={cost:.12f} ({dt:.1f}s)")
-
-            # Log results
-            logf.write(f"{width}\t{dt:.1f}\t{cost:.12f}\n")
-            logf.flush()
-
-            scatter_line = " ".join(f"{x:.10g}" for x in scatter)
-            logs.write(f"{scatter_line}\n")
-            logs.flush()
-
-        # Select best extract_width
-        best_width_idx = np.argmin(extract_costs)
-        best_extract_width = extract_widths[best_width_idx]
-        best_extract_cost = extract_costs[best_width_idx]
-
-        logf.close()
-        logs.close()
-
-        fancyprint(f"\n{'='*60}")
-        fancyprint(f"BEST EXTRACT_WIDTH: {best_extract_width}")
-        fancyprint(f"BEST COST: {best_extract_cost:.12f}")
-        fancyprint(f"{'='*60}\n")
-
-        # Generate plots
-        fancyprint("Generating optimization plots...")
-        plot_cost(name_str)
-
-        # Run final Stage 3 with best width
-        fancyprint(f"\nRunning final Stage 3 with optimal extract_width={best_extract_width}...")
-        stage3_results = run_stage3(
-            stage2_files,
-            save_results=True,
-            force_redo=True,
-            extract_method=cfg['extract_method'],
-            soss_specprofile=cfg.get('soss_specprofile'),
-            centroids=centroids_df,
-            extract_width=best_extract_width,
-            st_teff=cfg.get('st_teff'),
-            st_logg=cfg.get('st_logg'),
-            st_met=cfg.get('st_met'),
-            planet_letter=cfg.get('planet_letter'),
-            output_tag=cfg['output_tag'],
-            do_plot=cfg.get('do_plots', False),
-            pipeline_outputs_directory=base_outdir,
-            **cfg.get('stage3_kwargs', {})
+        base_row_values = {
+            'ad_hoc_mode': 'extract_width_only',
+            'remove_components': cfg.get('remove_components'),
+        }
+        stage3_results, best_extract_width, _, best_row_idx = run_ad_hoc_extract_width_search(
+            stage2_files, cfg, centroids_df, deepframe, baseline_ints, wave_range, w1, w2,
+            name_str, base_row_values
         )
 
-        # Generate diagnostic plots
+        fancyprint("Generating optimization plots...")
+        plot_cost(name_str)
         diagnostic_plot(stage3_results, name_str, baseline_ints=baseline_ints, outdir=outdir_f)
 
-        # Generate scatter plot
         outfile = os.path.join(outdir_f, f"Scatter_{name_str}.txt")
         specfile = glob.glob(os.path.join(outdir_s3, "*_box_spectra_fullres.fits"))[0]
-        best_idx = pd.read_csv(os.path.join(outdir_f, f"Cost_{name_str}.txt"), sep="\t")['cost'].idxmin()
-
         plot_scatter(
             txtfile=outfile,
-            rows=[best_idx],
+            rows=[best_row_idx],
             wave_range=wave_range_plot,
             smooth=10,
             spectrum_files=[specfile],
@@ -1184,7 +1331,6 @@ def main():
             save_path=os.path.join(outdir_f, f"Scatter_Plot_{name_str}.png"),
         )
 
-        # Print final timing
         t1 = time.perf_counter() - t0_total
         h, m = divmod(int(t1), 3600)
         m, s = divmod(m, 60)
@@ -1192,8 +1338,113 @@ def main():
         fancyprint(f"TOTAL RUNTIME: {h}h {m:02d}min {s:02d}s")
         fancyprint(f"OPTIMAL EXTRACT_WIDTH: {best_extract_width}")
         fancyprint(f"{'='*60}\n")
+        return
 
-        return  # Exit early - we're done!
+    if from_pca_only:
+        fancyprint(f"\n{'='*60}")
+        fancyprint("FROM PCA ONLY MODE ENABLED")
+        fancyprint("Restarting from existing BadPix outputs and rerunning PCA/Stage 3 only")
+        fancyprint(f"{'='*60}\n")
+
+        optimize_flags = [
+            k for k in cfg.keys()
+            if k.startswith('optimize_') and k not in ['optimize_extract_width',
+                                                       'optimize_extract_width_only',
+                                                       'optimize_from_pca_only']
+        ]
+        for flag in optimize_flags:
+            if cfg[flag]:
+                raise ValueError(
+                    f"{flag} must be False when from_pca_only=True. "
+                    "Only optimize_extract_width may be True in this mode."
+                )
+
+        remove_components = cfg.get('remove_components')
+        if remove_components in [None, 'None', 'null', '']:
+            raise ValueError("remove_components must be set when from_pca_only=True")
+
+        fancyprint("Looking for existing BadPix Step outputs...")
+        badpix_files = find_existing_stage2_outputs(
+            [f'{outdir_s2}*_badpixstep.fits'],
+            f"No BadPix Step outputs found in {outdir_s2}. "
+            "Please run the optimizer through BadPixStep before using from_pca_only mode."
+        )
+        fancyprint("Looking for centroids file...")
+        centroids_df = load_ad_hoc_centroids(cfg)
+
+        pca_skip_steps = [
+            'AssignWCSStep', 'Extract2DStep', 'SourceTypeStep', 'WaveCorrStep',
+            'FlatFieldStep', 'BackgroundStep', 'OneOverFStep', 'BadPixStep'
+        ]
+        fancyprint(f"Rerunning PCAReconstructStep with remove_components={remove_components}")
+        stage2_results, deepframe = run_stage2(
+            badpix_files,
+            mode=cfg['observing_mode'],
+            soss_background_model=cfg.get('soss_background_file'),
+            baseline_ints=cfg['baseline_ints'],
+            save_results=True,
+            force_redo=True,
+            space_thresh=cfg.get('space_outlier_threshold'),
+            time_thresh=cfg.get('time_outlier_threshold'),
+            remove_components=remove_components,
+            pca_components=cfg.get('pca_components'),
+            soss_timeseries=cfg.get('soss_timeseries'),
+            soss_timeseries_o2=cfg.get('soss_timeseries_o2'),
+            oof_method=cfg.get('oof_method'),
+            output_tag=cfg['output_tag'],
+            skip_steps=pca_skip_steps,
+            generate_lc=cfg.get('generate_lc'),
+            soss_inner_mask_width=cfg.get('soss_inner_mask_width'),
+            soss_outer_mask_width=cfg.get('soss_outer_mask_width'),
+            nirspec_mask_width=cfg.get('nirspec_mask_width'),
+            pixel_masks=cfg.get('outlier_maps'),
+            f277w=cfg.get('f277w'),
+            do_plot=cfg.get('do_plots', False),
+            centroids=cfg.get('centroids'),
+            miri_trace_width=cfg.get('miri_trace_width'),
+            miri_background_width=cfg.get('miri_background_width'),
+            miri_background_method=cfg.get('miri_background_method'),
+            pipeline_outputs_directory=base_outdir,
+            **cfg.get('stage2_kwargs', {})
+        )
+        if deepframe is None:
+            deepframe = resolve_ad_hoc_deepframe(cfg)
+
+        base_row_values = {
+            'ad_hoc_mode': 'from_pca_only',
+            'remove_components': remove_components,
+        }
+        stage3_results, best_extract_width, _, best_row_idx = run_ad_hoc_extract_width_search(
+            stage2_results, cfg, centroids_df, deepframe, baseline_ints, wave_range, w1, w2,
+            name_str, base_row_values
+        )
+
+        fancyprint("Generating optimization plots...")
+        plot_cost(name_str)
+        diagnostic_plot(stage3_results, name_str, baseline_ints=baseline_ints, outdir=outdir_f)
+
+        outfile = os.path.join(outdir_f, f"Scatter_{name_str}.txt")
+        specfile = glob.glob(os.path.join(outdir_s3, "*_box_spectra_fullres.fits"))[0]
+        plot_scatter(
+            txtfile=outfile,
+            rows=[best_row_idx],
+            wave_range=wave_range_plot,
+            smooth=10,
+            spectrum_files=[specfile],
+            ylim=ylim_plot,
+            style="line",
+            save_path=os.path.join(outdir_f, f"Scatter_Plot_{name_str}.png"),
+        )
+
+        t1 = time.perf_counter() - t0_total
+        h, m = divmod(int(t1), 3600)
+        m, s = divmod(m, 60)
+        fancyprint(f"\n{'='*60}")
+        fancyprint(f"TOTAL RUNTIME: {h}h {m:02d}min {s:02d}s")
+        fancyprint(f"OPTIMAL EXTRACT_WIDTH: {best_extract_width}")
+        fancyprint(f"REMOVE_COMPONENTS: {format_log_value(remove_components)}")
+        fancyprint(f"{'='*60}\n")
+        return
 
     # ===== NORMAL MODE: FULL OPTIMIZATION =====
     # Load input files
@@ -1218,8 +1469,15 @@ def main():
     param_ranges = {}  # parametrs to optimize
     fixed_params = {}  # fixed parameters
 
+    optimizer_control_flags = {
+        'optimize_extract_width_only',
+        'optimize_from_pca_only',
+    }
     for k, v in cfg.items():
         if k.startswith("optimize_"):
+            if k in optimizer_control_flags:
+                continue
+
             param_name = k[len("optimize_"):]
 
             # Special handling for extract_width - optimize in Phase 2 using custom cost function
@@ -1234,6 +1492,13 @@ def main():
                 else:
                     fixed_params[param_name] = cfg[param_name]
                 continue  # Skip the normal processing below
+
+            if param_name not in cfg:
+                fancyprint(
+                    f'Skipping optimizer control flag "{k}" because "{param_name}" is not a config parameter.',
+                    msg_type='WARNING'
+                )
+                continue
 
             if v:  # true = optimize (sweep)
                 vals = cfg[param_name]
@@ -1265,7 +1530,7 @@ def main():
             'name': 'OneOverFStep_grp',
             'stage': 1,
             'params': ['soss_inner_mask_width', 'soss_outer_mask_width', 'nirspec_mask_width'],
-            'skip_before': ['DQInitStep', 'EmiCorrStep', 'SaturationStep', 'ResetStep',
+            'skip_before': ['DQInitStep', 'EmiCorrStep',  'ResetStep',
                            'SuperBiasStep', 'RefPixStep', 'DarkCurrentStep'],
             'skip_after': ['LinearityStep', 'JumpStep', 'RampFitStep', 'GainScaleStep'],
         },
@@ -1273,7 +1538,7 @@ def main():
             'name': 'JumpStep',
             'stage': 1,
             'params': ['time_jump_threshold', 'time_window'],
-            'skip_before': ['DQInitStep', 'EmiCorrStep', 'SaturationStep', 'ResetStep',
+            'skip_before': ['DQInitStep', 'EmiCorrStep',  'ResetStep',
                            'SuperBiasStep', 'RefPixStep', 'DarkCurrentStep',
                            'OneOverFStep_grp', 'LinearityStep'],
             'skip_after': ['RampFitStep', 'GainScaleStep'],
@@ -1285,7 +1550,7 @@ def main():
             'params': ['miri_trace_width', 'miri_background_width'],
             'skip_before': ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep',
                            'WaveCorrStep', 'FlatFieldStep'],
-            'skip_after': ['OneOverFStep_int', 'BadPixStep', 'PCAReconstructStep', 'TracingStep'],
+            'skip_after': ['OneOverFStep_int', 'BadPixStep', 'PCAReconstructStep'],
         },
         {
             'name': 'BadPixStep',
@@ -1293,7 +1558,7 @@ def main():
             'params': ['space_outlier_threshold', 'time_outlier_threshold', 'box_size', 'window_size'],
             'skip_before': ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep',
                            'WaveCorrStep', 'FlatFieldStep', 'BackgroundStep', 'OneOverFStep_int'],
-            'skip_after': ['PCAReconstructStep', 'TracingStep'],
+            'skip_after': ['PCAReconstructStep'],
         },
         # Stage 3 checkpoint - only for Phase 2 (full dataset)
         {
@@ -1366,6 +1631,15 @@ def main():
                         step_output_pattern = f"{outdir_s2}*_backgroundstep.fits"
                     elif checkpoint['name'] == 'BadPixStep':
                         step_output_pattern = f"{outdir_s2}*_badpixstep.fits"
+                        # Also delete cached hot_pixels.npy to force spatial outlier
+                        # redetection with new parameters (space_thresh, box_size).
+                        hotpix_pattern = f"{outdir_s2}*hot_pixels.npy"
+                        hotpix_files = glob.glob(hotpix_pattern)
+                        if hotpix_files:
+                            fancyprint(f"Deleting {len(hotpix_files)} cached hot_pixels file(s):")
+                            for hf in hotpix_files:
+                                fancyprint(f"  Deleting: {hf}")
+                                os.remove(hf)
 
                     if step_output_pattern:
                         files_to_delete = glob.glob(step_output_pattern)
@@ -1383,7 +1657,7 @@ def main():
                     skip_list = checkpoint['skip_after'].copy()
 
                     # ALSO add user's skip preferences from YAML config
-                    stage1_steps = ['DQInitStep', 'EmiCorrStep', 'SaturationStep', 'ResetStep', 'SuperBiasStep',
+                    stage1_steps = ['DQInitStep', 'EmiCorrStep',  'ResetStep', 'SuperBiasStep',
                                     'RefPixStep', 'DarkCurrentStep', 'OneOverFStep_grp', 'LinearityStep', 'JumpStep',
                                     'RampFitStep', 'GainScaleStep']
                     for step in stage1_steps:
@@ -1426,6 +1700,8 @@ def main():
                         centroids=run_cfg.get('centroids'),
                         hot_pixel_map=run_cfg.get('hot_pixel_map'),
                         miri_drop_groups=run_cfg.get('miri_drop_groups'),
+                        saturation_threshold=run_cfg.get('saturation_threshold'),
+                        f277w=run_cfg.get('f277w'),
                         pipeline_outputs_directory=base_outdir,
                         **s1_kwargs
                     )
@@ -1436,7 +1712,7 @@ def main():
                 elif checkpoint['stage'] == 2:
                     # First, need Stage 1 results (use cached)
                     # Build skip list for Stage 1 based on user config
-                    stage1_steps = ['DQInitStep', 'EmiCorrStep', 'SaturationStep', 'ResetStep', 'SuperBiasStep',
+                    stage1_steps = ['DQInitStep', 'EmiCorrStep',  'ResetStep', 'SuperBiasStep',
                                     'RefPixStep', 'DarkCurrentStep', 'OneOverFStep_grp', 'LinearityStep', 'JumpStep',
                                     'RampFitStep', 'GainScaleStep']
                     stage1_skip_for_s2 = []
@@ -1473,6 +1749,9 @@ def main():
                         hot_pixel_map=run_cfg.get('hot_pixel_map'),
                         miri_drop_groups=run_cfg.get('miri_drop_groups'),
                         pipeline_outputs_directory=base_outdir,
+                        saturation_threshold=run_cfg.get('saturation_threshold'),
+                        f277w=run_cfg.get('f277w'),
+
                         **run_cfg.get('stage1_kwargs', {})
                     )
 
@@ -1481,7 +1760,7 @@ def main():
 
                     # ALSO add user's skip preferences from YAML config
                     stage2_steps = ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep', 'WaveCorrStep',
-                                    'FlatFieldStep', 'OneOverFStep_int', 'BackgroundStep', 'TracingStep',
+                                    'FlatFieldStep', 'OneOverFStep_int', 'BackgroundStep', 
                                     'BadPixStep', 'PCAReconstructStep']
                     for step in stage2_steps:
                         if run_cfg.get(step) == 'skip' and step not in skip_list:
@@ -1502,7 +1781,7 @@ def main():
 
                     # Run Stage 2 with force_redo=False
                     # The deleted cached file will trigger rerun from that step onward
-                    stage2_results, stage2_centroids = run_stage2(
+                    stage2_results, _ = run_stage2(
                         stage1_results,
                         mode=run_cfg['observing_mode'],
                         soss_background_model=run_cfg.get('soss_background_file'),
@@ -1517,14 +1796,12 @@ def main():
                         soss_timeseries_o2=run_cfg.get('soss_timeseries_o2'),
                         oof_method=run_cfg.get('oof_method'),
                         output_tag=run_cfg['output_tag'],
-                        smoothing_scale=run_cfg.get('smoothing_scale'),
                         skip_steps=skip_list,
                         generate_lc=run_cfg.get('generate_lc'),
                         soss_inner_mask_width=run_cfg.get('soss_inner_mask_width'),
                         soss_outer_mask_width=run_cfg.get('soss_outer_mask_width'),
                         nirspec_mask_width=run_cfg.get('nirspec_mask_width'),
                         pixel_masks=run_cfg.get('outlier_maps'),
-                        generate_order0_mask=run_cfg.get('generate_order0_mask'),
                         f277w=run_cfg.get('f277w'),
                         do_plot=run_cfg.get('do_plots', False),
                         centroids=run_cfg.get('centroids'),
@@ -1535,15 +1812,12 @@ def main():
                         **s2_kwargs
                     )
 
-                    if isinstance(stage2_centroids, np.ndarray):
-                        stage2_centroids = pd.DataFrame(stage2_centroids.T, columns=["xpos", "ypos"])
-
                     datafile = stage2_results[0]
 
                 elif checkpoint['stage'] == 3:
                     # Need Stage 1 and 2 completed first (use cached)
                     # Build skip list for Stage 1 based on user config
-                    stage1_steps = ['DQInitStep', 'EmiCorrStep', 'SaturationStep', 'ResetStep', 'SuperBiasStep',
+                    stage1_steps = ['DQInitStep', 'EmiCorrStep',  'ResetStep', 'SuperBiasStep',
                                     'RefPixStep', 'DarkCurrentStep', 'OneOverFStep_grp', 'LinearityStep', 'JumpStep',
                                     'RampFitStep', 'GainScaleStep']
                     stage1_skip_for_s3 = []
@@ -1580,12 +1854,15 @@ def main():
                         hot_pixel_map=run_cfg.get('hot_pixel_map'),
                         miri_drop_groups=run_cfg.get('miri_drop_groups'),
                         pipeline_outputs_directory=base_outdir,
+                                               saturation_threshold=run_cfg.get('saturation_threshold'),
+                        f277w=run_cfg.get('f277w'),
+
                         **run_cfg.get('stage1_kwargs', {})
                     )
 
                     # Build skip list for Stage 2 based on user config
                     stage2_steps = ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep', 'WaveCorrStep',
-                                    'FlatFieldStep', 'OneOverFStep_int', 'BackgroundStep', 'TracingStep',
+                                    'FlatFieldStep', 'OneOverFStep_int', 'BackgroundStep', 
                                     'BadPixStep', 'PCAReconstructStep']
                     stage2_skip_for_s3 = []
                     for step in stage2_steps:
@@ -1611,13 +1888,11 @@ def main():
                         oof_method=run_cfg.get('oof_method'),
                         output_tag=run_cfg['output_tag'],
                         skip_steps=stage2_skip_for_s3,
-                        smoothing_scale=run_cfg.get('smoothing_scale'),
                         generate_lc=run_cfg.get('generate_lc'),
                         soss_inner_mask_width=run_cfg.get('soss_inner_mask_width'),
                         soss_outer_mask_width=run_cfg.get('soss_outer_mask_width'),
                         nirspec_mask_width=run_cfg.get('nirspec_mask_width'),
                         pixel_masks=run_cfg.get('outlier_maps'),
-                        generate_order0_mask=run_cfg.get('generate_order0_mask'),
                         f277w=run_cfg.get('f277w'),
                         do_plot=run_cfg.get('do_plots', False),
                         centroids=run_cfg.get('centroids'),
@@ -1707,7 +1982,7 @@ def main():
     final_cfg.update(current_best)
 
     # Build skip lists for Stage 1 and Stage 2 based on config settings
-    stage1_steps = ['DQInitStep', 'EmiCorrStep', 'SaturationStep', 'ResetStep', 'SuperBiasStep',
+    stage1_steps = ['DQInitStep', 'EmiCorrStep',  'ResetStep', 'SuperBiasStep',
                     'RefPixStep', 'DarkCurrentStep', 'OneOverFStep_grp', 'LinearityStep', 'JumpStep',
                     'RampFitStep', 'GainScaleStep']
     stage1_skip = []
@@ -1747,12 +2022,15 @@ def main():
         hot_pixel_map=final_cfg.get('hot_pixel_map'),
         miri_drop_groups=final_cfg.get('miri_drop_groups'),
         pipeline_outputs_directory=base_outdir,
+                               saturation_threshold=final_cfg.get('saturation_threshold'),
+                        f277w=final_cfg.get('f277w'),
+
         **final_cfg.get('stage1_kwargs', {})
     )
 
     # Build skip list for Stage 2
     stage2_steps = ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep', 'WaveCorrStep',
-                    'FlatFieldStep', 'OneOverFStep_int', 'BackgroundStep', 'TracingStep',
+                    'FlatFieldStep', 'OneOverFStep_int', 'BackgroundStep', 
                     'BadPixStep', 'PCAReconstructStep']
     stage2_skip = []
     for step in stage2_steps:
@@ -1765,7 +2043,7 @@ def main():
     fancyprint(f"Stage 2 steps to skip: {stage2_skip}")
 
     # Stage 2
-    stage2_results, final_centroids = run_stage2(
+    stage2_results, final_deepframe = run_stage2(
         stage1_results,
         mode=final_cfg['observing_mode'],
         soss_background_model=final_cfg.get('soss_background_file'),
@@ -1781,13 +2059,11 @@ def main():
         oof_method=final_cfg.get('oof_method'),
         output_tag=final_cfg['output_tag'],
         skip_steps=stage2_skip,
-        smoothing_scale=final_cfg.get('smoothing_scale'),
         generate_lc=final_cfg.get('generate_lc'),
         soss_inner_mask_width=final_cfg.get('soss_inner_mask_width'),
         soss_outer_mask_width=final_cfg.get('soss_outer_mask_width'),
         nirspec_mask_width=final_cfg.get('nirspec_mask_width'),
         pixel_masks=final_cfg.get('outlier_maps'),
-        generate_order0_mask=final_cfg.get('generate_order0_mask'),
         f277w=final_cfg.get('f277w'),
         do_plot=final_cfg.get('do_plots', False),
         centroids=final_cfg.get('centroids'),
@@ -1798,10 +2074,24 @@ def main():
         **final_cfg.get('stage2_kwargs', {})
     )
 
-    if isinstance(final_centroids, np.ndarray):
-        final_centroids = pd.DataFrame(final_centroids.T, columns=["xpos", "ypos"])
+    # new_stage2.run_stage2 now returns (results, deepframe), not centroids.
+    # If no centroids are explicitly provided (or already saved on disk), let new_stage3 trace
+    # them directly from the deepframe during Stage 3 extraction.
+    centroids_cfg = final_cfg.get('centroids')
+    if centroids_cfg not in [None, 'None', 'null', '']:
+        this_centroid = centroids_cfg
+    else:
+        centroid_files = sorted(glob.glob(f'{outdir_s2}*centroids.csv'))
+        if centroid_files:
+            fancyprint(f"  Loading centroids from: {centroid_files[0]}")
+            this_centroid = pd.read_csv(centroid_files[0], comment='#')
+        else:
+            fancyprint("No Stage 2 centroid table found. Stage 3 will trace centroids from the deepframe.")
+            this_centroid = None
 
-    this_centroid = final_cfg.get('centroids') if final_cfg.get('centroids') is not None else final_centroids
+    this_deepframe = resolve_ad_hoc_deepframe(final_cfg)
+    if this_deepframe is None:
+        this_deepframe = final_deepframe
 
     # ===== OPTIMIZE EXTRACT_WIDTH IF REQUESTED =====
     if cfg.get('optimize_extract_width', False):
@@ -1839,6 +2129,7 @@ def main():
                 planet_letter=final_cfg.get('planet_letter'),
                 output_tag=final_cfg['output_tag'],
                 do_plot=final_cfg.get('do_plots', False),
+                deepframe=this_deepframe,
                 pipeline_outputs_directory=base_outdir,
                 **final_cfg.get('stage3_kwargs', {})
             )
@@ -1887,7 +2178,6 @@ def main():
         # Regenerate plot with extract_width optimization results
         fancyprint("\n=== Updating optimization plot with extract_width results ===")
         plot_cost(name_str)
-
         # Final Stage 3 with optimal width
         stage3_results = run_stage3(
             stage2_results,
@@ -1903,6 +2193,7 @@ def main():
             planet_letter=final_cfg.get('planet_letter'),
             output_tag=final_cfg['output_tag'],
             do_plot=final_cfg.get('do_plots', False),
+            deepframe=this_deepframe,
             pipeline_outputs_directory=base_outdir,
             **final_cfg.get('stage3_kwargs', {})
         )
@@ -1927,6 +2218,8 @@ def main():
             planet_letter=final_cfg.get('planet_letter'),
             output_tag=final_cfg['output_tag'],
             do_plot=final_cfg.get('do_plots', False),
+            deepframe=this_deepframe,
+            pipeline_outputs_directory=base_outdir,
             **final_cfg.get('stage3_kwargs', {})
         )
 
@@ -2016,4 +2309,3 @@ def main():
 
 if __name__ == "__main__":
     main() 
-
