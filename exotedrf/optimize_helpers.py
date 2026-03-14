@@ -13,7 +13,7 @@ import os
 
 from exotedrf import utils
 from exotedrf.utils import fancyprint
-from exotedrf.stage3 import get_wave_soss
+from exotedrf.stage3 import get_wave_soss, trace_spectrum
 import matplotlib.pyplot as plt
 
 
@@ -259,10 +259,11 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
             cens = utils.get_centroids_nirspec(deepstack, xstart=xstart, save_results=False)
             centroids['xpos'], centroids['ypos'] = cens[0], cens[1]
         elif instrument == 'MIRI':
-            from exotedrf.stage2 import TracingStep
-            tracer = TracingStep([datafile], deepframe=deepstack, output_dir=output_dir)
-            cens = tracer.run(save_results=False, force_redo=False)
-            centroids['xpos'], centroids['ypos'] = cens[0], cens[1]
+            cens = trace_spectrum([datafile], deepstack, output_dir=output_dir, save_results=False)
+            if isinstance(cens, str):
+                centroids = pd.read_csv(cens, comment='#')
+            else:
+                centroids['xpos'], centroids['ypos'] = cens[0], cens[1]
 
     # extract by instrument
     if instrument == 'NIRSPEC':
@@ -512,5 +513,3 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
 
     else:
         raise ValueError(f"Unknown instrument: {instrument}")
-
-
