@@ -13,7 +13,6 @@ import bottleneck as bn
 import copy
 from functools import partial
 import glob
-import more_itertools as mit
 import numpy as np
 import os
 import pandas as pd
@@ -438,7 +437,10 @@ class BackgroundStep:
             # If an output file for this segment already exists, skip the step.
             expected_file = self.output_dir + self.fileroots[i] + self.tag
             expected_bkg = self.output_dir + self.fileroot_noseg + 'background.npy'
-            if expected_file in all_files and force_redo is False:
+            can_skip = expected_file in all_files
+            if self.instrument == 'NIRISS':
+                can_skip = can_skip and expected_bkg in all_files
+            if can_skip and force_redo is False:
                 fancyprint('File {} already exists.'.format(expected_file))
                 fancyprint('Skipping Background Subtraction Step.')
                 res = expected_file
@@ -580,6 +582,84 @@ class FlatFieldStep:
         return results
 
 
+class PhotomStep:
+    """Wrapper around default calwebb_spec2 Photometric Calibration step.
+    """
+
+    def __init__(self, input_data, output_dir='./'):
+        """Step initializer.
+
+        Parameters
+        ----------
+        input_data : array-like(str), array-like(datamodel)
+            List of paths to input data or the input data itself.
+        output_dir : str
+            Path to directory to which to save outputs.
+        """
+
+        # Set up easy attributes.
+        self.tag = 'photomstep.fits'
+        self.output_dir = output_dir
+
+        # Unpack input data files.
+        self.datafiles = utils.sort_datamodels(input_data)
+        self.fileroots = utils.get_filename_root(self.datafiles)
+
+        # Get instrument.
+        self.instrument = utils.get_instrument_name(self.datafiles[0])
+
+    def run(self, save_results=True, force_redo=False, **kwargs):
+        """Method to run the step.
+
+        Parameters
+        ----------
+        save_results : bool
+            If True, save results.
+        force_redo : bool
+            If True, run step even if output files are detected.
+        kwargs : dict
+            Keyword arguments for calwebb_spec2.photom_step.PhotomStep.
+
+        Returns
+        -------
+        results : list(datamodel)
+            Input data files processed through the step.
+        """
+
+        # Only run this step for NIRSpec when flux calibrating.
+        if self.instrument != 'NIRSPEC':
+            raise NotImplementedError('PhotomStep only implemented for NIRSpec.')
+
+        # If the instrument is NIRSpec, then proceed with the step.
+        results = []
+        all_files = glob.glob(self.output_dir + '*')
+        for i, segment in enumerate(self.datafiles):
+            # If an output file for this segment already exists, skip the step.
+            expected_file = self.output_dir + self.fileroots[i] + self.tag
+            if expected_file in all_files and force_redo is False:
+                fancyprint('File {} already exists.'.format(expected_file))
+                fancyprint('Skipping Photometric Calibration Step.')
+                res = expected_file
+            # If no output files are detected, run the step.
+            else:
+                step = calwebb_spec2.photom_step.PhotomStep()
+                res = step.call(segment, output_dir=self.output_dir, save_results=save_results,
+                                **kwargs)
+                # Verify that filename is correct.
+                if save_results is True:
+                    current_name = self.output_dir + res.meta.filename
+                    if expected_file != current_name:
+                        res.close()
+                        os.rename(current_name, expected_file)
+                        thisfile = fits.open(expected_file)
+                        thisfile[0].header['FILENAME'] = self.fileroots[i] + self.tag
+                        thisfile.writeto(expected_file, overwrite=True)
+                    res = expected_file
+            results.append(res)
+
+        return results
+
+
 class BadPixStep:
     """Wrapper around custom Bad Pixel Correction Step.
     """
@@ -648,10 +728,17 @@ class BadPixStep:
         all_files = glob.glob(self.output_dir + '*')
         results = []
         first_time = True
+        expected_hotpix = self.output_dir + self.fileroot_noseg + 'hot_pixels.npy'
+        to_flag = None
+        if save_results is True and expected_hotpix in all_files and force_redo is False:
+            to_flag = np.load(expected_hotpix)
         for i, segment in enumerate(self.datafiles):
             # If an output file for this segment already exists, skip the step.
             expected_file = self.output_dir + self.fileroots[i] + self.tag
-            if expected_file in all_files and force_redo is False:
+            can_skip = expected_file in all_files
+            if save_results is True:
+                can_skip = can_skip and expected_hotpix in all_files
+            if can_skip and force_redo is False:
                 fancyprint('File {} already exists.'.format(expected_file))
                 fancyprint('Skipping Bad Pixel Correction Step.')
                 res = expected_file
@@ -665,7 +752,6 @@ class BadPixStep:
                     deepstack = utils.make_baseline_stack_general(datafiles=self.datafiles,
                                                                   baseline_ints=self.baseline_ints)
 
-                    to_flag = None  # No pixels yet identified to flag.
                     first_time = False
 
                 step_results = badpixstep(segment, deepframe=deepstack, output_dir=self.output_dir,
@@ -676,7 +762,7 @@ class BadPixStep:
                 res, to_flag = step_results
             results.append(res)
 
-        if save_results is True:
+        if save_results is True and to_flag is not None:
             # Save hot pixel mask.
             outfile = self.output_dir + self.fileroot_noseg + 'hot_pixels.npy'
             np.save(outfile, to_flag)
@@ -744,7 +830,7 @@ class PCAReconstructStep:
         result : list(CubeModel), list(str)
             Input datamodels, after PCA reconstruction.
         deepstack : np.ndarray(float)
-            Deep stack of the observation.
+            Deep stack of the observations.
         """
 
         # Warn user that datamodels will be returned if not saving results.
@@ -761,7 +847,7 @@ class PCAReconstructStep:
             expected_file = self.output_dir + self.fileroots[i] + self.tag
             expected_deep = self.output_dir + self.fileroot_noseg + 'deepframe.fits'
             # If an output is missing, then we need to re run.
-            if expected_file not in all_files:
+            if expected_file not in all_files or expected_deep not in all_files:
                 do_step = 0
                 break
             # If ouput is present add to return.
@@ -810,120 +896,6 @@ class PCAReconstructStep:
         fancyprint('Step PCAReconstructStep done.')
 
         return results, deepstack
-
-
-class TracingStep:
-    """Wrapper around custom Tracing Step.
-    """
-
-    def __init__(self, input_data, deepframe, output_dir='./', generate_order0_mask=False,
-                 f277w=None):
-        """Step initializer.
-
-        Parameters
-        ----------
-        input_data : array-like(str), array-like(datamodel)
-            List of paths to input data or the input data itself.
-        deepframe : str, np.ndarray(float)
-            Path to observation deep frame or the deep frame itself.
-        output_dir : str
-            Path to directory to which to save outputs.
-        generate_order0_mask : bool
-            If True, generate a mask of background star order 0s using an
-            F277W exposure. For SOSS observations only.
-        f277w : str, np.ndarray(float)
-            F277W exposure deepstack or path to a file containing one.
-        """
-
-        # Set up easy attributes.
-        self.output_dir = output_dir
-
-        # Set toggles for functionalities.
-        self.generate_order0_mask = generate_order0_mask
-
-        # Unpack input data files.
-        self.datafiles = utils.sort_datamodels(input_data)
-        self.fileroots = utils.get_filename_root(self.datafiles)
-        self.fileroot_noseg = utils.get_filename_root_noseg(self.fileroots)
-
-        # Unpack deepframe.
-        if isinstance(deepframe, str):
-            fancyprint('Reading deepframe file: {}...'.format(deepframe))
-            self.deepframe = fits.getdata(deepframe)
-        elif isinstance(deepframe, np.ndarray) or deepframe is None:
-            self.deepframe = deepframe
-        else:
-            msg = 'Invalid type for deepframe: {}'.format(type(deepframe))
-            raise ValueError(msg)
-
-        # Unpack F277W exposure.
-        if isinstance(f277w, str):
-            fancyprint('Reading F277W exposure file: {}...'.format(f277w))
-            self.f277w = np.load(f277w)
-        elif isinstance(f277w, np.ndarray) or f277w is None:
-            self.f277w = f277w
-        else:
-            msg = 'Invalid type for f277w: {}'.format(type(f277w))
-            raise ValueError(msg)
-
-        # Get instrument.
-        self.instrument = utils.get_instrument_name(self.datafiles[0])
-        if self.instrument != 'NIRISS':
-            if generate_order0_mask is True:
-                fancyprint('generate_order0_mask is set to True, but mode is not NIRISS/SOSS. '
-                           'Ignoring generate_order0_mask.', msg_type='WARNING')
-                self.generate_order0_mask = False
-
-    def run(self, pixel_flags=None, save_results=True, force_redo=False, do_plot=False,
-            show_plot=False, allow_miri_slope=False):
-        """Method to run the step.
-
-        Parameters
-        ----------
-        pixel_flags : array-like(str), None
-            Paths to files containing existing pixel flags to which the order 0 mask should be
-            added. Only necesssary if generate_order0_mask is True.
-        save_results : bool
-            If True, save results.
-        force_redo : bool
-            If True, run step even if output files are detected.
-        do_plot : bool
-            If True, do step diagnostic plot.
-        show_plot : bool
-            If True, show the step diagnostic plot.
-        allow_miri_slope : bool
-            If True, allow the MIRI centroids to be sloped.
-
-        Returns
-        -------
-        centroids : np.ndarray(float), str
-            Trace centroids for all orders or path to centroids file.
-        """
-
-        fancyprint('TracingStep instance created.')
-
-        all_files = glob.glob(self.output_dir + '*')
-        # If an output file for this segment already exists, skip the step.
-        suffix = 'centroids.csv'
-        expected_file = self.output_dir + self.fileroot_noseg + suffix
-        if expected_file in all_files and force_redo is False:
-            fancyprint('Main output file already exists.')
-            fancyprint('If you wish to still produce secondary outputs, run with force_redo=True.')
-            fancyprint('Skipping Tracing Step.')
-            centroids = expected_file
-        # If no output files are detected, run the step.
-        else:
-            centroids = tracingstep(datafiles=self.datafiles, deepframe=self.deepframe,
-                                    pixel_flags=pixel_flags,
-                                    generate_order0_mask=self.generate_order0_mask,
-                                    f277w=self.f277w, output_dir=self.output_dir,
-                                    save_results=save_results, fileroot_noseg=self.fileroot_noseg,
-                                    do_plot=do_plot, show_plot=show_plot,
-                                    allow_miri_slope=allow_miri_slope)
-
-        fancyprint('Step TracingStep done.')
-
-        return centroids
 
 
 def backgroundstep_miri(datafile, trace_mask_width=20, background_width=14, method='slope',
@@ -1598,193 +1570,6 @@ def pcareconstructionstep(datafiles, pca_components=10, remove_components=None, 
     return results
 
 
-def tracingstep(datafiles, deepframe=None, pixel_flags=None, generate_order0_mask=False,
-                f277w=None, output_dir='./', save_results=True, fileroot_noseg='', do_plot=False,
-                show_plot=False, allow_miri_slope=False):
-    """A multipurpose step to perform some initial analysis of the 2D dataframes and produce
-    products which can be useful in further reduction iterations. The functionalities are
-    detailed below:
-    1. Locate the centroids of all three SOSS orders via the edgetrigger algorithm.
-    2. (optional) Generate a mask of order 0 contaminants from background stars.
-
-    Parameters
-    ----------
-    datafiles : array-like(RampModel), array-like(str)
-        Datamodels for each segment of the TSO.
-    deepframe : ndarray(float), None
-        Deep stack for the TSO. Should be 2D (dimy, dimx). If None is passed, one will be generated.
-    pixel_flags: array-like(str), None
-        Paths to files containing existing pixel flags to which the order 0 mask should be added.
-        Only necesssary if generate_order0_mask is True.
-    generate_order0_mask : bool
-        If True, generate a mask of order 0 cotaminants using an F277W filter exposure.
-    f277w : ndarray(float), None
-        F277W filter exposure which has been superbias and background corrected. Only necessary if
-        generate_order0_mask is True.
-    output_dir : str
-        Directory to which to save outputs.
-    save_results : bool
-        If Tre, save results to file.
-    fileroot_noseg : str
-        Root file name with no segment information.
-    do_plot : bool
-        If True, do the step diagnostic plot.
-    show_plot : bool
-        If True, show the step diagnostic plot instead of/in addition to saving it to file.
-    allow_miri_slope : bool
-        If True, allow the MIRI centroids to be sloped.
-
-    Returns
-    -------
-    centroids : np.ndarray(float), str
-        Trace centroids for all orders, or path to centroids file.
-    """
-
-    fancyprint('Starting Tracing Step.')
-
-    datafiles = np.atleast_1d(datafiles)
-    # If no deepframe is passed, construct one.
-    if deepframe is None:
-        # Construct datacube from the data files.
-        for i, file in enumerate(datafiles):
-            if isinstance(file, str):
-                this_data = fits.getdata(file, 1)
-            else:
-                this_data = file.data
-            if i == 0:
-                cube = this_data
-            else:
-                cube = np.concatenate([cube, this_data], axis=0)
-        deepframe = utils.make_deepstack(cube)
-
-    # ===== PART 1: Get centroids for orders one to three =====
-    fancyprint('Finding trace centroids.')
-    instrument = utils.get_instrument_name(datafiles[0])
-    if instrument == 'NIRISS':
-        subarray = utils.get_soss_subarray(datafiles[0])
-        # Get the most up to date trace table file.
-        step = calwebb_spec2.extract_1d_step.Extract1dStep()
-        tracetable = step.get_reference_file(datafiles[0], 'spectrace')
-        # Get centroids via the edgetrigger method.
-        save_filename = output_dir + fileroot_noseg
-        centroids = utils.get_centroids_soss(deepframe, tracetable, subarray,
-                                             save_results=save_results, save_filename=save_filename)
-    elif instrument == 'NIRSPEC':
-        # Get centroids via the edgetrigger method.
-        save_filename = output_dir + fileroot_noseg
-        det = utils.get_nrs_detector_name(datafiles[0])
-        subarray = utils.get_soss_subarray(datafiles[0])
-        grating = utils.get_nrs_grating(datafiles[0])
-        xstart = utils.get_nrs_trace_start(det, subarray, grating)
-        centroids = utils.get_centroids_nirspec(deepframe, xstart=xstart, save_results=save_results,
-                                                save_filename=save_filename)
-    else:
-        # Get centroids via the edgetrigger method.
-        save_filename = output_dir + fileroot_noseg
-        centroids = utils.get_centroids_miri(deepframe, ystart=50, save_results=save_results,
-                                             save_filename=save_filename,
-                                             allow_slope=allow_miri_slope)
-
-    # Do diagnostic plot if requested.
-    if do_plot is True:
-        if save_results is True:
-            if instrument == 'NIRSPEC':
-                outfile = output_dir + 'centroiding_{}.png'.format(det)
-            else:
-                outfile = output_dir + 'centroiding.png'
-        else:
-            outfile = None
-        miri_scale = False
-        if instrument == 'MIRI':
-            miri_scale = True
-        plotting.make_centroiding_plot(deepframe, centroids, instrument, show_plot=show_plot,
-                                       outfile=outfile, miri_scale=miri_scale)
-
-    if save_results is True:
-        centroids = save_filename + 'centroids.csv'
-
-    # If not saving outputs, skip optional parts.
-    if generate_order0_mask is True:
-        if save_results is False:
-            fancyprint('Optional outputs requested but save_results=False. '
-                       'Skipping optional outputs.', msg_type='WARNING')
-            generate_order0_mask = False
-
-    # ===== PART 2: Create order 0 background contamination mask =====
-    # If requested, create a mask for all background order 0 contaminants.
-    if generate_order0_mask is True:
-        fancyprint('Generating background order 0 mask.')
-        order0mask = make_order0_mask_from_f277w(f277w)
-
-        # Save the order 0 mask to file.
-        if save_results is True:
-            # If we are to combine the trace mask with existing pixel mask.
-            if pixel_flags is not None:
-                pixel_flags = np.atleast_1d(pixel_flags)
-                # Ensure there is one pixel flag file per data file
-                assert len(pixel_flags) == len(datafiles)
-                # Combine with existing flags and overwrite old file.
-                for flag_file in pixel_flags:
-                    with fits.open(flag_file) as old_flags:
-                        currentflag = old_flags[1].data.astype(bool) | order0mask.astype(bool)
-                        old_flags[1].data = currentflag.astype(int)
-                        old_flags.writeto(flag_file, overwrite=True)
-                # Overwrite old flags file.
-                parts = pixel_flags[0].split('seg')
-                outfile = parts[0] + 'seg' + 'XXX' + parts[1][3:]
-                fancyprint('Order 0 mask added to {}'.format(outfile))
-            else:
-                hdu = fits.PrimaryHDU(order0mask)
-                suffix = 'order0_mask.fits'
-                outfile = output_dir + fileroot_noseg + suffix
-                hdu.writeto(outfile, overwrite=True)
-                fancyprint('Order 0 mask saved to {}'.format(outfile))
-
-    return centroids
-
-
-def make_order0_mask_from_f277w(f277w, thresh_std=1, thresh_size=10):
-    """Locate order 0 contaminants from background stars using an F277W filter exposure data frame.
-
-    Parameters
-    ----------
-    f277w : array-like(float)
-        An F277W filter exposure, superbias and background subtracted.
-    thresh_std : int
-        Threshold above which a group of pixels will be flagged.
-    thresh_size : int
-        Size of pixel group to be considered an order 0.
-
-    Returns
-    -------
-    mask : array-like(int)
-        Frame with locations of order 0 contaminants.
-    """
-
-    dimy, dimx = np.shape(f277w)
-    mask = np.zeros_like(f277w)
-
-    # Loop over all columns and find groups of pixels which are significantly above the column
-    # median.
-    # Start at column 700 as that is ~where pickoff mirror effects start.
-    for col in range(700, dimx):
-        # Subtract median from column and get the standard deviation
-        diff = f277w[:, col] - np.nanmedian(f277w[:, col])
-        dev = np.nanstd(diff)
-        # Find pixels which are deviant.
-        vals = np.where(np.abs(diff) > thresh_std * dev)[0]
-        # Mark consecutive groups of pixels found above.
-        for group in mit.consecutive_groups(vals):
-            group = list(group)
-            if len(group) > thresh_size:
-                # Extend 3 columns and rows to either size.
-                min_g = np.max([0, np.min(group) - 3])
-                max_g = np.min([dimy - 1, np.max(group) + 3])
-                mask[min_g:max_g, (col - 3):(col + 3)] = 1
-
-    return mask
-
-
 def soss_stability_pca(cube, n_components=10, outfile=None, do_plot=False, show_plot=False):
     """Calculate the stability of the SOSS trace over the course of a TSO using a PCA method.
 
@@ -1851,9 +1636,10 @@ def run_stage2(results, mode, soss_background_model=None, baseline_ints=None, sa
                pca_components=10, soss_timeseries=None, soss_timeseries_o2=None,
                oof_method='scale-achromatic', root_dir='./', output_tag='', skip_steps=None,
                generate_lc=True, soss_inner_mask_width=40, soss_outer_mask_width=70,
-               nirspec_mask_width=16, pixel_masks=None, generate_order0_mask=True, f277w=None,
-               do_plot=False, show_plot=False, centroids=None, miri_trace_width=20,
-               miri_background_width=14, miri_background_method='median', **kwargs):
+               nirspec_mask_width=16, pixel_masks=None, f277w=None, do_plot=False, show_plot=False,
+               centroids=None, miri_trace_width=20, miri_background_width=14,
+               miri_background_method='median',
+               pipeline_outputs_directory='pipeline_outputs_directory', **kwargs):
     """Run the exoTEDRF Stage 2 pipeline: spectroscopic processing, using a combination of official
     STScI DMS and custom steps. Documentation for the official DMS steps can be found here:
     https://jwst-pipeline.readthedocs.io/en/latest/jwst/pipeline/calwebb_spec2.html
@@ -1905,8 +1691,6 @@ def run_stage2(results, mode, soss_background_model=None, baseline_ints=None, sa
     pixel_masks: None, str, array-like(str)
         Paths to files containing existing pixel flags to which the order 0 mask should be added.
         Only necesssary if generate_order0_mask is True.
-    generate_order0_mask : bool
-        If True, generate a mask of order 0 cotaminants using an F277W filter exposure.
     f277w : None, str, array-like(float)
         F277W filter exposure which has been superbias and background corrected.
         Only necessary if generate_order0_mask is True.
@@ -1928,8 +1712,8 @@ def run_stage2(results, mode, soss_background_model=None, baseline_ints=None, sa
     -------
     results : list(CubeModel)
         Datafiles for each segment processed through Stage 2.
-    centroids : ndarray(fllat), str
-        Centroids for all spectral orders.
+    deepframe : ndarray(float), str
+        Deep stack of the observations.
     """
 
     # ============== DMS Stage 2 ==============
@@ -1940,9 +1724,15 @@ def run_stage2(results, mode, soss_background_model=None, baseline_ints=None, sa
     if output_tag != '':
         output_tag = '_' + output_tag
     # Create output directories and define output paths.
-    utils.verify_path(root_dir + 'pipeline_outputs_directory' + output_tag)
-    utils.verify_path(root_dir + 'pipeline_outputs_directory' + output_tag + '/Stage2')
-    outdir = root_dir + 'pipeline_outputs_directory' + output_tag + '/Stage2/'
+    # Handle absolute vs relative pipeline_outputs_directory paths.
+    import os
+    if os.path.isabs(pipeline_outputs_directory) or pipeline_outputs_directory.startswith('~'):
+        base_dir = os.path.expanduser(pipeline_outputs_directory) + output_tag
+    else:
+        base_dir = os.path.join(root_dir, pipeline_outputs_directory + output_tag)
+    utils.verify_path(base_dir)
+    utils.verify_path(os.path.join(base_dir, 'Stage2'))
+    outdir = os.path.join(base_dir, 'Stage2/')
 
     if skip_steps is None:
         skip_steps = []
@@ -2034,7 +1824,7 @@ def run_stage2(results, mode, soss_background_model=None, baseline_ints=None, sa
             step = stage1.OneOverFStep(results, output_dir=outdir, baseline_ints=baseline_ints,
                                        pixel_masks=pixel_masks, centroids=centroids,
                                        method=oof_method, soss_timeseries=soss_timeseries,
-                                       soss_timeseries_o2=soss_timeseries_o2)
+                                       soss_timeseries_o2=soss_timeseries_o2, f277w=f277w)
             results = step.run(soss_inner_mask_width=soss_inner_mask_width,
                                soss_outer_mask_width=soss_outer_mask_width,
                                nirspec_mask_width=nirspec_mask_width, save_results=save_results,
@@ -2071,14 +1861,5 @@ def run_stage2(results, mode, soss_background_model=None, baseline_ints=None, sa
     else:
         deepframe = None
 
-    # ===== Tracing Step =====
-    # Custom DMS step.
-    if 'TracingStep' not in skip_steps:
-        step = TracingStep(results, deepframe=deepframe, output_dir=outdir,
-                           generate_order0_mask=generate_order0_mask, f277w=f277w)
-        centroids = step.run(pixel_flags=pixel_masks, save_results=save_results, do_plot=do_plot,
-                             show_plot=show_plot, force_redo=force_redo)
-    else:
-        centroids = None
+    return results, deepframe
 
-    return results, centroids
