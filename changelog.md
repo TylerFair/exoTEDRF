@@ -1,6 +1,20 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+### [X.X.X] -- 20XX-XX-XX
+#### Added
+- New SOSS-only Stage 1 pipeline step to correct the ADC INL effect identified by Dholakia et al. (2026).
+
+### [2.4.3] -- 2026-05-29
+#### Added
+- Synchronize saturation definition with the JWST ETC. Saturation threshold now defaults to 80% of full well.
+
+### [2.4.2] -- 2026-05-13
+#### Added
+- Fix bug when binning light curves to a fixed number of pixels instead of resolution. 
+- Fix bug which would cause flux to be zero if the extraction aperture exceeeded detector bounds.
+- Fix bug which swapped optimally extracted error for variance.
+
 ### [2.4.1] -- 2026-02-23
 #### Added
 - Updates to efficiency and memory usage in light curve fitting. 
