@@ -973,6 +973,7 @@ def do_ccf(wave, flux, mod_flux, oversample=5):
                 step /= oversample
                 for s in range(1, oversample):
                     new_wave.append(thiswave[i] + s * step)
+        new_wave = np.array(new_wave)
         thisflux = np.interp(new_wave, thiswave, thisflux)
         thismod = np.interp(new_wave, thiswave, thismod)
     else:
