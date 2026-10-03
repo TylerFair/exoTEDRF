@@ -207,6 +207,11 @@ first_pass_extract_method : 'box'
 # Saturation threshold in percent of full well. The dev branch default is 80.
 saturation_threshold: 80
 saturation_rescue : False
+# Stage 3 box-extraction DQ masking (fork options). False reproduces upstream exoTEDRF 2.5.0,
+# whose BadPixStep no longer clears DQ flags of interpolated pixels. Pre-merge fork behaviour:
+# both True plus stage2_kwargs BadPixStep {preserve_saturated: True, clear_interpolated_dq: True}.
+mask_saturated_pixels : False
+mask_do_not_use_pixels : False
 
 
 # ========================= END OPTIMIZER CONFIG FILE =========================

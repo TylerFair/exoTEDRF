@@ -1329,7 +1329,8 @@ def run_stage3_for_width(stage2_inputs, cfg, centroids, deepframe, extract_width
         do_plot=cfg.get('do_plots', False),
         deepframe=deepframe,
         saturation_rescue=cfg.get('saturation_rescue', False),
-        mask_do_not_use_pixels=cfg.get('mask_do_not_use_pixels', True),
+        mask_saturated_pixels=cfg.get('mask_saturated_pixels', False),
+        mask_do_not_use_pixels=cfg.get('mask_do_not_use_pixels', False),
         pipeline_outputs_directory=base_outdir,
         **cfg.get('stage3_kwargs', {})
     )
@@ -2397,7 +2398,8 @@ def main():
                 do_plot=final_cfg.get('do_plots', False),
                 deepframe=this_deepframe,
                 saturation_rescue=final_cfg.get('saturation_rescue', False),
-                mask_do_not_use_pixels=final_cfg.get('mask_do_not_use_pixels', True),
+                mask_saturated_pixels=final_cfg.get('mask_saturated_pixels', False),
+                mask_do_not_use_pixels=final_cfg.get('mask_do_not_use_pixels', False),
                 pipeline_outputs_directory=base_outdir,
                 **final_cfg.get('stage3_kwargs', {})
             )
@@ -2464,7 +2466,8 @@ def main():
             do_plot=final_cfg.get('do_plots', False),
             deepframe=this_deepframe,
             saturation_rescue=final_cfg.get('saturation_rescue', False),
-            mask_do_not_use_pixels=final_cfg.get('mask_do_not_use_pixels', True),
+            mask_saturated_pixels=final_cfg.get('mask_saturated_pixels', False),
+            mask_do_not_use_pixels=final_cfg.get('mask_do_not_use_pixels', False),
             pipeline_outputs_directory=base_outdir,
             **final_cfg.get('stage3_kwargs', {})
         )
@@ -2492,7 +2495,8 @@ def main():
             do_plot=final_cfg.get('do_plots', False),
             deepframe=this_deepframe,
             saturation_rescue=final_cfg.get('saturation_rescue', False),
-            mask_do_not_use_pixels=final_cfg.get('mask_do_not_use_pixels', True),
+            mask_saturated_pixels=final_cfg.get('mask_saturated_pixels', False),
+            mask_do_not_use_pixels=final_cfg.get('mask_do_not_use_pixels', False),
             pipeline_outputs_directory=base_outdir,
             **final_cfg.get('stage3_kwargs', {})
         )

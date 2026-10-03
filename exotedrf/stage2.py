@@ -87,20 +87,27 @@ class AssignWCSStep:
             # If no output files are detected, run the step.
             else:
                 if self.instrument == 'NIRSPEC':
-                    jwst.assign_wcs.nirspec.nrs_wcs_set_input = partial(
-                        jwst.assign_wcs.nirspec.nrs_wcs_set_input,
-                        wavelength_range=[6e-08, 6e-06]
-                    )
                     # Edit slit parameters so wavelength solution can be correctly calculated.
-                    slit_y_low, slit_y_high = -50, 50
+                    # Make detector bounding box as wide as possible so nothing is ever clipped.
+                    jwst.assign_wcs.nirspec.generate_compound_bbox = partial(
+                        jwst.assign_wcs.nirspec.generate_compound_bbox,
+                        wavelength_range=[6e-08, 6e-06],
+                    )
+                    slit_y_low, slit_y_high = -50, 50  # These may not actually do anything anymore.
                 else:
                     slit_y_low, slit_y_high = -0.55, 0.55
                 step = calwebb_spec2.assign_wcs_step.AssignWcsStep()
                 res = step.call(segment, output_dir=self.output_dir, save_results=save_results,
                                 slit_y_low=slit_y_low, slit_y_high=slit_y_high, **kwargs)
+
+                # Also add the sourcetype here: always "POINT" for a TSO.
+                fancyprint('Setting TSO srctype to "POINT"')
+                res.meta.target.source_type = 'POINT'
+
                 # Verify that filename is correct.
                 if save_results is True:
                     current_name = self.output_dir + res.meta.filename
+                    res.save(current_name)  # Save to file to save srctype change.
                     if expected_file != current_name:
                         res.close()
                         os.rename(current_name, expected_file)
@@ -177,155 +184,6 @@ class Extract2DStep:
                 step = calwebb_spec2.extract_2d_step.Extract2dStep()
                 res = step.call(segment, output_dir=self.output_dir,
                                 save_results=save_results, **kwargs)
-                # Verify that filename is correct.
-                if save_results is True:
-                    current_name = self.output_dir + res.meta.filename
-                    if expected_file != current_name:
-                        res.close()
-                        os.rename(current_name, expected_file)
-                        thisfile = fits.open(expected_file)
-                        thisfile[0].header['FILENAME'] = self.fileroots[i] + self.tag
-                        thisfile.writeto(expected_file, overwrite=True)
-                    res = expected_file
-            results.append(res)
-
-        return results
-
-
-class SourceTypeStep:
-    """Wrapper around default calwebb_spec2 Source Type Determination step.
-    """
-
-    def __init__(self, input_data, output_dir='./'):
-        """Step initializer.
-
-        Parameters
-        ----------
-        input_data : array-like(str), array-like(datamodel)
-            List of paths to input data or the input data itself.
-        output_dir : str
-            Path to directory to which to save outputs.
-        """
-
-        # Set up easy attributes.
-        self.tag = 'sourcetypestep.fits'
-        self.output_dir = output_dir
-
-        # Unpack input data files.
-        self.datafiles = utils.sort_datamodels(input_data)
-        self.fileroots = utils.get_filename_root(self.datafiles)
-
-    def run(self, save_results=True, force_redo=False, **kwargs):
-        """Method to run the step.
-
-        Parameters
-        ----------
-        save_results : bool
-            If True, save results.
-        force_redo : bool
-            If True, run step even if output files are detected.
-        kwargs : dict
-            Keyword arguments for calwebb_spec2.srctype_step.SourceTypeStep.
-
-        Returns
-        -------
-        results : list(datamodel)
-            Input data files processed through the step.
-        """
-
-        results = []
-        all_files = glob.glob(self.output_dir + '*')
-        for i, segment in enumerate(self.datafiles):
-            # If an output file for this segment already exists, skip the step.
-            expected_file = self.output_dir + self.fileroots[i] + self.tag
-            if expected_file in all_files and force_redo is False:
-                fancyprint('File {} already exists.'.format(expected_file))
-                fancyprint('Skipping Source Type Determination Step.')
-                res = expected_file
-            # If no output files are detected, run the step.
-            else:
-                step = calwebb_spec2.srctype_step.SourceTypeStep()
-                res = step.call(segment, output_dir=self.output_dir, save_results=save_results,
-                                **kwargs)
-                # Verify that filename is correct.
-                if save_results is True:
-                    current_name = self.output_dir + res.meta.filename
-                    if expected_file != current_name:
-                        res.close()
-                        os.rename(current_name, expected_file)
-                        thisfile = fits.open(expected_file)
-                        thisfile[0].header['FILENAME'] = self.fileroots[i] + self.tag
-                        thisfile.writeto(expected_file, overwrite=True)
-                    res = expected_file
-            results.append(res)
-
-        return results
-
-
-class WaveCorrStep:
-    """Wrapper around default calwebb_spec2 Wavelength Correction step.
-    """
-
-    def __init__(self, input_data, output_dir='./'):
-        """Step initializer.
-
-        Parameters
-        ----------
-        input_data : array-like(str), array-like(datamodel)
-            List of paths to input data or the input data itself.
-        output_dir : str
-            Path to directory to which to save outputs.
-        """
-
-        # Set up easy attributes.
-        self.tag = 'wavecorrstep.fits'
-        self.output_dir = output_dir
-
-        # Unpack input data files.
-        self.datafiles = utils.sort_datamodels(input_data)
-        self.fileroots = utils.get_filename_root(self.datafiles)
-
-        # Get instrument.
-        self.instrument = utils.get_instrument_name(self.datafiles[0])
-
-    def run(self, save_results=True, force_redo=False, **kwargs):
-        """Method to run the step.
-
-        Parameters
-        ----------
-        save_results : bool
-            If True, save results.
-        force_redo : bool
-            If True, run step even if output files are detected.
-        kwargs : dict
-            Keyword arguments for calwebb_spec2.wavecorr_step.WavecorrStep.
-
-        Returns
-        -------
-        results : list(datamodel)
-            Input data files processed through the step.
-        """
-
-        # Only run for NIRSpec observations.
-        if self.instrument != 'NIRSPEC':
-            fancyprint('Wavelength correction only necessary for NIRSpec.')
-            fancyprint('Skipping Wavelength Correction Step.')
-            return self.datafiles
-
-        results = []
-        all_files = glob.glob(self.output_dir + '*')
-        for i, segment in enumerate(self.datafiles):
-            # If an output file for this segment already exists, skip the step.
-            expected_file = self.output_dir + self.fileroots[i] + self.tag
-            if expected_file in all_files and force_redo is False:
-                fancyprint('File {} already exists.'.format(expected_file))
-                fancyprint('Skipping Wavelength Correction Step.')
-                res = expected_file
-            # If no output files are detected, run the step.
-            else:
-                step = calwebb_spec2.wavecorr_step.WavecorrStep()
-                res = step.call(segment, output_dir=self.output_dir, save_results=save_results,
-                                **kwargs)
                 # Verify that filename is correct.
                 if save_results is True:
                     current_name = self.output_dir + res.meta.filename
@@ -690,8 +548,9 @@ class BadPixStep:
         # Get instrument.
         self.instrument = utils.get_instrument_name(self.datafiles[0])
 
-    def run(self, space_thresh=15, time_thresh=10, box_size=5, window_size=5, save_results=True,
-            force_redo=False, do_plot=False, show_plot=False):
+    def run(self, space_thresh=15, time_thresh=10, box_size=5, window_size=5, median_high_variance=False,
+            save_results=True, force_redo=False, do_plot=False, show_plot=False,
+            preserve_saturated=False, clear_interpolated_dq=False):
         """Method to run the step.
 
         Parameters
@@ -704,6 +563,15 @@ class BadPixStep:
             Size of box around each pixel to test for spatial outliers.
         window_size : int
             Size of temporal window around each pixel to text for deviations. Must be odd.
+        median_high_variance : bool
+            If True, set residual high-variance pixels to the stack median. Should be avoided in
+            datasets with massive saturation.
+        preserve_saturated : bool
+            If True, never interpolate SATURATED pixels (optimizer saturation-rescue workflow).
+            Default False reproduces upstream behaviour.
+        clear_interpolated_dq : bool
+            If True, zero the DQ flags of interpolated pixels (pre-2.5.0 behaviour). Default False
+            reproduces upstream 2.5.0, which keeps the DQ record.
         save_results : bool
             If True, save results.
         force_redo : bool
@@ -758,7 +626,10 @@ class BadPixStep:
                                           save_results=save_results, fileroot=self.fileroots[i],
                                           space_thresh=space_thresh, time_thresh=time_thresh,
                                           box_size=box_size, window_size=window_size,
-                                          do_plot=do_plot, show_plot=show_plot, to_flag=to_flag)
+                                          do_plot=do_plot, show_plot=show_plot, to_flag=to_flag,
+                                          median_high_variance=median_high_variance,
+                                          preserve_saturated=preserve_saturated,
+                                          clear_interpolated_dq=clear_interpolated_dq)
                 res, to_flag = step_results
             results.append(res)
 
@@ -1184,7 +1055,8 @@ def backgroundstep_soss(datafile, background_model, deepstack, output_dir='./', 
 
 def badpixstep(datafile, deepframe, space_thresh=15, time_thresh=10, box_size=5, window_size=5,
                output_dir='./', save_results=True, fileroot=None, do_plot=False, show_plot=False,
-               to_flag=None):
+               to_flag=None, median_high_variance=False, preserve_saturated=False,
+               clear_interpolated_dq=False):
     """Identify and correct outlier pixels remaining in the dataset, using both a spatial and
     temporal approach. First, find spatial outlier pixels in the median stack and correct them in
     each integration via the median of a box of surrounding pixels. Then flag outlier pixels in the
@@ -1217,6 +1089,15 @@ def badpixstep(datafile, deepframe, space_thresh=15, time_thresh=10, box_size=5,
         If True, show the step diagnostic plot instead of/in addition to saving it to file.
     to_flag : array-like(int)
         Map of pixels to interpolate.
+    median_high_variance : bool
+        If True, set residual high-variance pixels to the stack median. Should be avoided in
+        datasets with massive saturation.
+    preserve_saturated : bool
+        If True, never interpolate pixels carrying the SATURATED DQ flag (optimizer
+        saturation-rescue workflow). Default False reproduces upstream behaviour.
+    clear_interpolated_dq : bool
+        If True, zero the DQ flags of interpolated pixels (pre-2.5.0 behaviour). Default False
+        reproduces upstream 2.5.0, which keeps the DQ record.
 
     Returns
     -------
@@ -1249,7 +1130,7 @@ def badpixstep(datafile, deepframe, space_thresh=15, time_thresh=10, box_size=5,
 
     # Initialize starting loop variables.
     newdata = np.copy(cube)
-    newdq = np.copy(dq_cube)
+    newdq = np.copy(dq_cube).astype(np.uint64)  # Needed to prevent overflow error from new flags.
     nint, dimy, dimx = np.shape(newdata)
     saturated = (dq_cube.astype(np.uint32) & np.uint32(2)) != 0
     saturated_any = np.any(saturated, axis=0)
@@ -1316,14 +1197,14 @@ def badpixstep(datafile, deepframe, space_thresh=15, time_thresh=10, box_size=5,
                         otherpix[j, i] = 1
 
         # Combine all flagged pixel maps.
-        badpix = (hotpix.astype(bool) | nanpix.astype(bool) |
-                  otherpix.astype(bool))
-        # SATURATED pixels carry physically meaningful DQ information for the later extraction
-        # choice: either mask them in Stage 3 or keep RampFit's pre-saturation slope estimate.
-        # Do not interpolate or clear their flags here.
-        badpix = badpix & ~saturated_any
+        badpix = (hotpix.astype(bool) | nanpix.astype(bool) | otherpix.astype(bool))
+        if preserve_saturated is True:
+            # Optimizer saturation rescue: SATURATED pixels carry physically meaningful DQ
+            # information for the later extraction choice (mask in Stage 3, or keep RampFit's
+            # pre-saturation slope). Do not interpolate them here.
+            badpix = badpix & ~saturated_any
         badpix = badpix.astype(int)
-        fancyprint('{0} hot, {1} nan, and {2} deviant pixels identified.'
+        fancyprint('{0} DQ flagged, {1} nan, and {2} deviant pixels identified.'
                    .format(int(np.sum(hotpix)), int(np.sum(nanpix)), int(np.sum(otherpix))))
 
     # If a bad pixel map is passed, just use that.
@@ -1336,31 +1217,81 @@ def badpixstep(datafile, deepframe, space_thresh=15, time_thresh=10, box_size=5,
     for i in tqdm(range(nint)):
         newdata[i], thisdq = utils.do_replacement(newdata[i], badpix, dq=np.ones_like(newdata[i]),
                                                   xbox_size=xbox_size, ybox_size=ybox_size)
-        # Set DQ flags for these pixels to zero (use the pixel).
-        thisdq = ~thisdq.astype(bool)
-        newdq[:, thisdq] = 0
+        if clear_interpolated_dq is True:
+            # Pre-2.5.0 behaviour: mark interpolated pixels as usable.
+            newdq[:, ~thisdq.astype(bool)] = 0
 
     # ===== Temporal Outlier Flagging =====
     fancyprint('Starting temporal outlier flagging...')
-    # Median filter the data.
-    cube_filt = median_filter(newdata, (window_size, 1, 1))
-    if instrument == 'NIRISS':
-        cube_filt[:2] = np.median(cube_filt[2:7], axis=0)
-        cube_filt[-2:] = np.median(cube_filt[-8:-3], axis=0)
-    else:
-        cube_filt[:5] = np.median(cube_filt[5:15], axis=0)
-        cube_filt[-5:] = np.median(cube_filt[-16:-6], axis=0)
-    # Check along the time axis for outlier pixels.
-    std_dev = bn.nanmedian(np.abs(0.5*(newdata[0:-2] + newdata[2:]) - newdata[1:-1]), axis=0)
-    std_dev = np.where(std_dev == 0, np.nanmedian(std_dev), std_dev)
-    scale = np.abs(newdata - cube_filt) / std_dev
-    ii = np.where((scale > time_thresh) & ~saturated)
-    fancyprint('{} outliers detected.'.format(len(ii[0])))
-    # Replace the flagged pixels in each integration.
-    fancyprint('Doing pixel replacement...')
-    newdata[ii] = cube_filt[ii]
-    newdq[ii] = 0
+    for niter in range(2):
+        # Median filter the data.
+        cube_filt = median_filter(newdata, (window_size, 1, 1))
 
+        if instrument == 'NIRISS':
+            cube_filt[:2] = np.median(cube_filt[2:7], axis=0)
+            cube_filt[-2:] = np.median(cube_filt[-8:-3], axis=0)
+        else:
+            cube_filt[:5] = np.median(cube_filt[5:15], axis=0)
+            cube_filt[-5:] = np.median(cube_filt[-16:-6], axis=0)
+        # Check along the time axis for outlier pixels.
+        # Calculate standard deviation along the time axis.
+        if niter == 0:
+            std_dev = bn.nanmedian(np.abs(0.5*(newdata[0:-2] + newdata[2:]) - newdata[1:-1]), axis=0)
+        else:
+            # Don't ask why.
+            std_dev = np.nanstd(newdata, axis=0)
+        std_dev = np.where(std_dev == 0, np.nanmedian(std_dev), std_dev)
+        # Interpolate massive outliers in std dev. This can happen for saturated, DNU pixels, etc.
+        # Use the same procedure as spatial pixel flagging.
+        std_flags = np.zeros_like(std_dev)
+        # Loop over std dev frame and flag deviant pixels.
+        for i in range(5, dimx - 5):
+            for j in range(ymax):
+                xbox_size_i = box_size
+                box_prop = utils.get_interp_box(std_dev, xbox_size_i, ybox_size, i, j)
+                # Ensure that the median and std dev extracted are good.
+                # If not, increase the box size until they are.
+                while np.any(np.isnan(box_prop)):
+                    xbox_size_i += 1
+                    box_prop = utils.get_interp_box(std_dev, xbox_size_i, ybox_size, i, j)
+                med, std = box_prop[0], box_prop[1]
+
+                # If pixel is too deviant flag it.
+                if np.abs(std_dev[j, i] - med) >= (space_thresh * std):
+                    std_flags[j, i] = 1
+        std_dev = utils.do_replacement(std_dev, std_flags, dq=np.ones_like(std_dev),
+                                       xbox_size=xbox_size, ybox_size=ybox_size)[0]
+        # Do pixel flagging and replacement.
+        if niter == 0:
+            # First time around do normal replacement of deviant pixels with the surrounding median.
+            # Subtract filtered cube and normalize by std dev.
+            scale = np.abs(newdata - cube_filt) / std_dev
+            if preserve_saturated is True:
+                ii = np.where((scale > time_thresh) & ~saturated)
+            else:
+                ii = np.where((scale > time_thresh))
+            fancyprint('{} outliers detected.'.format(len(ii[0])))
+            # Replace the flagged pixels in each integration.
+            fancyprint('Doing pixel replacement...')
+            newdata[ii] = cube_filt[ii]
+            if clear_interpolated_dq is True:
+                newdq[ii] = 0
+        else:
+            # Second time is to catch remaining high-variance pixels (likely saturated). that
+            # escape the above correction. Just replce them with the deepstack value.
+            # This shouldn't be a problem for isolated pixels, but should be avoided if there is
+            # e.g., massive saturation in the dataset.
+            fancyprint('{} remaining high-variance pixels detected.'.format(int(np.nansum(std_flags))))
+            stack = bn.nanmedian(newdata, axis=0)
+            newdq[:, std_flags.astype(bool)] += 2**32  # Add a DQ flag.
+            if median_high_variance is True:
+                fancyprint('Doing pixel replacement...')
+                replace = std_flags.astype(bool)
+                if preserve_saturated is True:
+                    replace = replace & ~saturated_any
+                newdata[:, replace] = stack[replace]
+
+    # ===== Final Checks =====
     # Lastly, do a final check for any remaining invalid flux or error values.
     ii = np.where(np.isnan(newdata))
     newdata[ii] = cube_filt[ii]
@@ -1384,9 +1315,10 @@ def badpixstep(datafile, deepframe, space_thresh=15, time_thresh=10, box_size=5,
         newdata[:, :, -5:] = 0
         newdata[:, -5:] = 0
 
-    # Preserve SATURATED flags even if other DQ flags were cleared during interpolation.
-    newdq = np.bitwise_or(newdq.astype(np.uint32),
-                          2 * saturated.astype(np.uint32)).astype(dq_cube.dtype)
+    # By default DQ flags are no longer cleared for interpolated pixels. If they were cleared
+    # (legacy option), restore SATURATED flags. newdq stays uint64 for HIGH_VARIANCE (2**32).
+    if clear_interpolated_dq is True:
+        newdq = np.bitwise_or(newdq, 2 * saturated.astype(np.uint64))
 
     # Save interpolated data.
     if save_results is True:
@@ -1644,7 +1576,7 @@ def soss_stability_pca(cube, n_components=10, outfile=None, do_plot=False, show_
     cube2[ii] = med
 
     # Do PCA.
-    pca = PCA(n_components=n_components)
+    pca = PCA(n_components=n_components, svd_solver="arpack")
     pca.fit(cube2.transpose())
 
     # Get PCA results.
@@ -1653,11 +1585,11 @@ def soss_stability_pca(cube, n_components=10, outfile=None, do_plot=False, show_
 
     # Reproject PCs onto data.
     projection = pca.transform(cube2.transpose())
-    projection = np.reshape(projection, (dimy, dimx, n_components))
 
     if do_plot is True:
         # Do plot.
-        plotting.make_pca_plot(pcs, var, projection.transpose(2, 0, 1), outfile=outfile,
+        projection_plot = np.reshape(projection, (dimy, dimx, n_components))
+        plotting.make_pca_plot(pcs, var, projection_plot.transpose(2, 0, 1), outfile=outfile,
                                show_plot=show_plot)
 
     # Reconstruct input data using extracted PCs.
@@ -1783,42 +1715,6 @@ def run_stage2(results, mode, soss_background_model=None, baseline_ints=None, sa
             step_kwargs = {}
         step = AssignWCSStep(results, output_dir=outdir)
         results = step.run(save_results=save_results, force_redo=force_redo, **step_kwargs)
-
-    # ===== Extract 2D Step =====
-    # Default DMS step.
-    if 'Extract2DStep' not in skip_steps:
-        if 'NIRSPEC' in mode.upper():
-            if 'Extract2DStep' in kwargs.keys():
-                step_kwargs = kwargs['Extract2DStep']
-            else:
-                step_kwargs = {}
-            step = Extract2DStep(results, output_dir=outdir)
-            results = step.run(save_results=save_results, force_redo=force_redo, **step_kwargs)
-        else:
-            fancyprint('Extract2DStep not supported for {}.'.format(mode), msg_type='WARNING')
-
-    # ===== Source Type Determination Step =====
-    # Default DMS step.
-    if 'SourceTypeStep' not in skip_steps:
-        if 'SourceTypeStep' in kwargs.keys():
-            step_kwargs = kwargs['SourceTypeStep']
-        else:
-            step_kwargs = {}
-        step = SourceTypeStep(results, output_dir=outdir)
-        results = step.run(save_results=save_results, force_redo=force_redo, **step_kwargs)
-
-    # ===== Wavelength Correction Step =====
-    # Default DMS step.
-    if 'WaveCorrStep' not in skip_steps:
-        if 'NIRSPEC' in mode.upper():
-            if 'WaveCorrStep' in kwargs.keys():
-                step_kwargs = kwargs['WaveCorrStep']
-            else:
-                step_kwargs = {}
-            step = WaveCorrStep(results, output_dir=outdir)
-            results = step.run(save_results=save_results, force_redo=force_redo, **step_kwargs)
-        else:
-            fancyprint('WaveCorrStep not supported for {}.'.format(mode), msg_type='WARNING')
 
     # ===== Flat Field Correction Step =====
     # Default DMS step.

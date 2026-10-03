@@ -335,10 +335,10 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
             deepstack = deepstack[group]
 
         if instrument == 'NIRISS':
-            from jwst.pipeline import calwebb_spec2
             subarray = utils.get_soss_subarray(datafile)
-            step = calwebb_spec2.extract_1d_step.Extract1dStep()
-            tracetable = step.get_reference_file(datafile, 'spectrace')
+            # exoTEDRF 2.5.0: the SOSS tracetable is fetched from GitHub, not CRDS/Extract1dStep.
+            ref_outdir = os.environ['CRDS_PATH'] + '/references/jwst/niriss/'
+            tracetable = utils.get_soss_tracetable(subarray, ref_outdir)
             cens = utils.get_centroids_soss(deepstack, tracetable, subarray, save_results=False)
             centroids['xpos'] = cens[0][0]
             centroids['ypos o1'] = cens[0][1]
@@ -475,7 +475,8 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
         fancyprint(f'  O1 flux.shape={flux_o1.shape}, sum={np.nansum(flux_o1):.6e}, mean={np.nanmean(flux_o1):.6e}')
         fancyprint(f'  O2 flux.shape={flux_o2.shape}, sum={np.nansum(flux_o2):.6e}, mean={np.nanmean(flux_o2):.6e}')
 
-        wave_o1, wave_o2 = get_wave_soss(datafile)
+        wave_o1, wave_o2 = get_wave_soss(datafile,
+                                         os.environ['CRDS_PATH'] + '/references/jwst/niriss/')
 
         # Diagnostic plots
         if plot_diagnostic:
