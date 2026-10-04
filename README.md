@@ -15,6 +15,9 @@ Currently supported are: **NIRISS/SOSS**, **NIRSpec/BOTS**, and **MIRI/LRS**. Ot
 ## Documentation
 An installation guide, code documentation, and tutorials are included in the [exoTEDRF documentation](https://exotedrf.readthedocs.io/en/latest/index.html).
 
+## exoTEDRF v2 (JAX)
+**exoTEDRF** also includes an optional GPU-capable implementation of the reduction and optimizer, written in JAX (`exotedrf.v2`). It uses the same configuration files and produces the same products as the standard pipeline, while keeping the observation in memory instead of writing every intermediate step to disk. See the [v2 guide](docs/content/v2_jax.rst) for installation and usage.
+
 ## Citations
 If you make use of this code in your work, please cite [Radica (2024)](https://ui.adsabs.harvard.edu/abs/2024arXiv240717541R/abstract), as well as [Radica et al. (2023)](https://ui.adsabs.harvard.edu/abs/2023MNRAS.524..835R/abstract) 
 and [Feinstein et al. (2023)](https://ui.adsabs.harvard.edu/abs/2023Natur.614..670F/abstract) for its first uses.  

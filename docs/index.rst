@@ -19,6 +19,7 @@ Currently supported instruments/modes are: **NIRISS/SOSS**, **NIRSpec/BOTS**, an
 
    content/installation
    content/usage
+   content/v2_jax
    content/citations
    content/contributions
    api/api
