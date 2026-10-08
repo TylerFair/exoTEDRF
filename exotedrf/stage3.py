@@ -11,9 +11,10 @@ Custom JWST DMS pipeline steps for Stage 3 (1D spectral extraction).
 from astropy.io import fits
 import glob
 import numpy as np
+from numpy.polynomial import chebyshev
 import os
 import pandas as pd
-import pastasoss
+# import pastasoss  # removing for now due to numpy version inconsistency with jwst v3.0.0
 from scipy.ndimage import median_filter
 from scipy.optimize import curve_fit, least_squares
 from scipy.signal import butter, filtfilt, correlate
@@ -24,6 +25,7 @@ from tqdm import tqdm
 from applesoss import applesoss
 
 from jwst import datamodels
+from jwst.assign_wcs.nirspec import nrs_wcs_set_input
 from jwst.pipeline import calwebb_spec2
 
 from exotedrf import utils, plotting
@@ -148,8 +150,8 @@ class Extract1DStep:
 
     def run(self, extract_width=40, extract_width_soss2=None, soss_specprofile=None, centroids=None,
             save_results=True, force_redo=False, do_plot=False, show_plot=False, deepframe=None,
-            use_pastasoss=False, soss_estimate=None, opt_max_iter=25, opt_var_thresh=25,
-            allow_miri_slope=False, saturation_rescue=False, mask_do_not_use_pixels=True):
+            use_pastasoss=False, opt_max_iter=25, opt_var_thresh=25, allow_miri_slope=False,
+            clip_thresh=10, saturation_rescue=False, mask_do_not_use_pixels=True):
         """Method to run the step.
 
         Parameters
@@ -176,20 +178,19 @@ class Extract1DStep:
             Path to file containing a median stack of the observations.
         use_pastasoss : bool
             If True, use pastasoss to esimate trace positions and wavelength solution.
-        soss_estimate : str, None
-            Path to file containing the soss_estimate for atoca extractions.
         opt_max_iter : int
             Maximum number of outlier rejection iterations to perform during optimal extraction.
         opt_var_thresh : int
             Variance threshold for a pixel to be flagged as an outlier during optimal exraction.
         allow_miri_slope : bool
             If True, allow the MIRI centroids to be sloped.
+        clip_thresh : int
+            Threshold for sigma clipping.
         saturation_rescue : bool
             If True for NIRISS/SOSS box extraction, keep post-RampFit pixels whose ramps were only
             partially saturated so RampFit's pre-saturation slope estimate can be extracted.
         mask_do_not_use_pixels : bool
             If True, NaN DO_NOT_USE pixels before box extraction in addition to saturation handling.
-
 
         Returns
         -------
@@ -220,11 +221,11 @@ class Extract1DStep:
                 if extract_width_soss2 is not None:
                     fancyprint('Order 2 cannot use a different width for ATOCA extraction.',
                                msg_type='WARNING')
+                fancyprint('DQ Report not available for ATOCA extraction.', msg_type='WARNING')
 
                 results = atoca_extract_soss(self.datafiles, soss_specprofile,
                                              output_dir=self.output_dir, save_results=save_results,
-                                             extract_width=extract_width, fileroots=self.fileroots,
-                                             soss_estimate=soss_estimate)
+                                             extract_width=extract_width, fileroots=self.fileroots)
 
             # Option 2: Simple aperture extraction - any instrument.
             elif self.extract_method == 'box':
@@ -235,8 +236,8 @@ class Extract1DStep:
                 if isinstance(deepframe, str):
                     deepframe = fits.getdata(deepframe)
 
-                # Need to make sure that we have the centroids. Passed centroids always take
-                # precedence.
+                # Need to make sure that we have the centroids.
+                # Passed centroids always take precedence.
                 if centroids is None:
                     centroids = trace_spectrum(self.datafiles, deepframe=deepframe,
                                                output_dir=self.output_dir,
@@ -260,21 +261,21 @@ class Extract1DStep:
                     results = box_extract_soss(self.datafiles, centroids, extract_width,
                                                soss_width_o2=extract_width_soss2, do_plot=do_plot,
                                                show_plot=show_plot, save_results=save_results,
-                                               output_dir=self.output_dir,
+                                               output_dir=self.output_dir, dq_report=True,
                                                mask_saturated_pixels=mask_saturated_pixels,
                                                mask_do_not_use_pixels=mask_do_not_use_pixels)
                 elif self.instrument == 'NIRSPEC':
                     results = box_extract_nirspec(self.datafiles, centroids, extract_width,
                                                   do_plot=do_plot, show_plot=show_plot,
                                                   save_results=save_results,
-                                                  output_dir=self.output_dir,
+                                                  output_dir=self.output_dir, dq_report=True,
                                                   mask_saturated_pixels=mask_saturated_pixels,
                                                   mask_do_not_use_pixels=mask_do_not_use_pixels)
                 else:
                     results = box_extract_miri(self.datafiles, centroids, extract_width,
                                                do_plot=do_plot, show_plot=show_plot,
                                                save_results=save_results,
-                                               output_dir=self.output_dir,
+                                               output_dir=self.output_dir, dq_report=True,
                                                mask_saturated_pixels=mask_saturated_pixels,
                                                mask_do_not_use_pixels=mask_do_not_use_pixels)
                 if extract_width == 'optimize':
@@ -309,11 +310,11 @@ class Extract1DStep:
                 if self.instrument == 'NIRSPEC':
                     results = optimal_extract_nirspec(self.datafiles, deepframe, centroids,
                                                       extract_width, max_iter=opt_max_iter,
-                                                      var_thresh=opt_var_thresh)
+                                                      var_thresh=opt_var_thresh, dq_report=True)
                 else:
                     results = optimal_extract_miri(self.datafiles, deepframe, centroids,
                                                    extract_width, max_iter=opt_max_iter,
-                                                   var_thresh=opt_var_thresh)
+                                                   var_thresh=opt_var_thresh, dq_report=True)
 
                 extract_width = 'N/A'
 
@@ -354,17 +355,18 @@ class Extract1DStep:
                 spectra = format_soss_spectra(results, times, extract_params, self.pl_name,
                                               st_teff, st_logg, st_met, pwcpos=pwcpos,
                                               output_dir=self.output_dir, save_results=save_results,
-                                              use_pastasoss=use_pastasoss)
+                                              use_pastasoss=use_pastasoss, clip_thresh=clip_thresh)
             elif self.instrument == 'NIRSPEC':
                 detector = utils.get_nrs_detector_name(self.datafiles[0])
+                grating = utils.get_nrs_grating(self.datafiles[0])
                 spectra = format_nirspec_spectra(results, times, extract_params, self.pl_name,
-                                                 detector, st_teff, st_logg, st_met,
+                                                 detector, grating, st_teff, st_logg, st_met,
                                                  output_dir=self.output_dir,
-                                                 save_results=save_results)
+                                                 save_results=save_results, clip_thresh=clip_thresh)
             else:
                 spectra = format_miri_spectra(results, times, extract_params, self.pl_name,
                                               st_teff, st_logg, st_met, output_dir=self.output_dir,
-                                              save_results=save_results)
+                                              save_results=save_results, clip_thresh=clip_thresh)
 
         return spectra
 
@@ -394,11 +396,13 @@ def specprofilestep(datafiles, empirical=True, output_dir='./'):
     datafiles = np.atleast_1d(datafiles)
 
     # Get the most up to date trace table file.
-    step = calwebb_spec2.extract_1d_step.Extract1dStep()
-    tracetable = step.get_reference_file(datafiles[0], 'spectrace')
+
+    subarray = utils.get_soss_subarray(datafiles[0])
+    # Get the correct tracetable file for the subarray being used.
+    outdir = os.environ['CRDS_PATH'] + '/references/jwst/niriss/'
+    tracetable = utils.get_soss_tracetable(subarray, outdir)
     # Get the most up to date 2D wavemap file.
-    step = calwebb_spec2.extract_1d_step.Extract1dStep()
-    wavemap = step.get_reference_file(datafiles[0], 'wavemap')
+    wavemap = utils.get_soss_wavemap(subarray, outdir)
 
     # Create a new deepstack but using all integrations, not just the baseline.
     for i, file in enumerate(datafiles):
@@ -438,8 +442,8 @@ def specprofilestep(datafiles, empirical=True, output_dir='./'):
     return filename
 
 
-def atoca_extract_soss(datafiles, specprofile, output_dir='./', save_results=True, extract_width=40,
-                       soss_estimate=None, fileroots=None):
+def atoca_extract_soss(datafiles, specprofile, fileroots, output_dir='./', save_results=True,
+                       extract_width=40):
     """Perform an extraction of SOSS observations using the ATOCA algorithm.
 
     Parameters
@@ -454,9 +458,7 @@ def atoca_extract_soss(datafiles, specprofile, output_dir='./', save_results=Tru
         If True, save results to file.
     extract_width : int
         Full extraction width, in pixels.
-    soss_estimate : str, None
-        Path to soss estimate file.
-    fileroots : array-like(str), None
+    fileroots : array-like(str)
         Filename roots.
 
     Returns
@@ -466,61 +468,30 @@ def atoca_extract_soss(datafiles, specprofile, output_dir='./', save_results=Tru
     """
 
     results = []
-    to_extract = {}
-    first_time = True
-    for i, file in enumerate(datafiles):
-        to_extract['{}'.format(i)] = file
-    while len(to_extract) != 0:
-        extracted = []
-        for i in to_extract.keys():
-            segment = to_extract[i]
-            # Initialize extraction parameters for ATOCA.
-            soss_modelname = fileroots[int(i)][:-1]
-            # Perform the extraction.
-            step = calwebb_spec2.extract_1d_step.Extract1dStep()
-            try:
-                res = step.call(segment, output_dir=output_dir, save_results=save_results,
-                                subtract_background=False,
-                                soss_bad_pix='model', soss_width=extract_width,
-                                soss_modelname=soss_modelname, override_specprofile=specprofile,
-                                soss_estimate=soss_estimate)
-                results.append(res)
-                # Note that this segment was extracted correctly.
-                extracted.append(i)
-                # The first time that an extraction is successful, create a soss_estimate if one
-                # does not already exist.
-                if first_time is True and soss_estimate is None:
-                    atoca_spectra = output_dir + fileroots[int(i)] + 'AtocaSpectra.fits'
-                    soss_estimate = get_soss_estimate(atoca_spectra, output_dir=output_dir)
-                    first_time = False
-            # When using ATOCA, sometimes a very specific error pops up when an initial estimate of
-            # the stellar spectrum cannot be obtained. This is needed to establish the wavelength
-            # grid (which has a varying resolution to better capture sharp features in stellar
-            # spectra). In these cases, the SOSS estimate provides information to create a
-            # wavelength grid.
-            except Exception as err:
-                if str(err) == '(m>k) failed for hidden m: fpcurf0:m=0':
-                    # If every segment has been tested and none work, just fail.
-                    if int(i) == len(datafiles) and len(extracted) == 0:
-                        fancyprint('No segments could be properly extracted.', msg_type='Error')
-                        raise err
-                    # If there's still hope, then just skip this segment for now and move onto the
-                    # next one.
-                    else:
-                        fancyprint('Initial flux estimate failed, and no soss estimate provided. '
-                                   'Moving to next segment.', msg_type='WARNING')
-                        continue
-                # If any other error pops up, raise it.
-                else:
-                    raise err
-        # Remove the extracted segments from the list of ones to extract.
-        for seg in extracted:
-            to_extract.pop(seg)
+    tag = 'extract1dstep.fits'
+    for i, segment in enumerate(datafiles):
+        # Initialize extraction parameters for ATOCA.
+        soss_modelname = fileroots[i][:-1]
+        # Perform the extraction.
+        step = calwebb_spec2.extract_1d_step.Extract1dStep()
+        res = step.call(segment, output_dir=output_dir, save_results=save_results,
+                        subtract_background=False, soss_bad_pix='model',
+                        soss_width=extract_width, soss_modelname=soss_modelname,
+                        override_specprofile=specprofile, soss_estimate=None)
 
-    # Sort the segments in chronological order, in case they were processed out of order.
-    seg_nums = [seg.meta.exposure.segment_number for seg in results]
-    ii = np.argsort(seg_nums)
-    results = np.array(results)[ii]
+        # Verify that filename is correct.
+        if save_results is True:
+            current_name = output_dir + res.meta.filename
+            expected_file = output_dir + fileroots[i] + tag
+            if expected_file != current_name:
+                res.close()
+                os.rename(current_name, expected_file)
+                thisfile = fits.open(expected_file)
+                thisfile[0].header['FILENAME'] = fileroots[i] + tag
+                thisfile.writeto(expected_file, overwrite=True)
+            res = expected_file
+
+        results.append(res)
 
     return results
 
@@ -595,7 +566,7 @@ def _mask_dq_pixels(data, err, dq, source_label, mask_saturated_pixels=True,
 
 def _load_box_extraction_cubes(datafiles, mask_saturated_pixels=True,
                                mask_do_not_use_pixels=True):
-    """Load science/error cubes and NaN selected DQ pixels before box extraction."""
+    """Load science/error/DQ cubes and NaN selected DQ pixels before box extraction."""
 
     datafiles = np.atleast_1d(datafiles)
     total_saturated = 0
@@ -625,20 +596,25 @@ def _load_box_extraction_cubes(datafiles, mask_saturated_pixels=True,
         if i == 0:
             cube = data
             ecube = err
+            dqcube = dq
         else:
             cube = np.concatenate([cube, data])
             ecube = np.concatenate([ecube, err])
+            if dqcube is not None and dq is not None:
+                dqcube = np.concatenate([dqcube, dq])
+            else:
+                dqcube = None
 
     if total_saturated > 0:
         fancyprint('Box extraction will ignore {} total DQ pixels.'
                    .format(total_saturated))
 
-    return cube, ecube
+    return cube, ecube, dqcube
 
 
 def box_extract_miri(datafiles, centroids, extract_width, do_plot=False, show_plot=False,
-                     save_results=True, output_dir='./', mask_saturated_pixels=True,
-                     mask_do_not_use_pixels=True):
+                     save_results=True, output_dir='./', dq_report=False,
+                     mask_saturated_pixels=True, mask_do_not_use_pixels=True):
     """Perform a simple box aperture extraction on MIRI.
 
     Parameters
@@ -653,12 +629,13 @@ def box_extract_miri(datafiles, centroids, extract_width, do_plot=False, show_pl
     do_plot : bool
         If True, do the step diagnostic plot.
     show_plot : bool
-        If True, show the step diagnostic plot instead of/in addition to
-        saving it to file.
+        If True, show the step diagnostic plot instead of/in addition to saving it to file.
     output_dir : str
         Directory to which to output results.
     save_results : bool
         If True, save results to file.
+    dq_report : bool
+        If True, return a report of relevant DQ flags in each aperture.
 
     Returns
     -------
@@ -668,14 +645,16 @@ def box_extract_miri(datafiles, centroids, extract_width, do_plot=False, show_pl
         2D extracted flux.
     ferr: ndarray[float]
         2D flux errors.
+    dq_rep: ndarray[int]
+        DQ report.
     extract_width : int
         Optimized aperture width.
     """
 
     datafiles = np.atleast_1d(datafiles)
-    cube, ecube = _load_box_extraction_cubes(datafiles,
-                                             mask_saturated_pixels=mask_saturated_pixels,
-                                             mask_do_not_use_pixels=mask_do_not_use_pixels)
+    cube, ecube, dqcube = _load_box_extraction_cubes(datafiles,
+                                                     mask_saturated_pixels=mask_saturated_pixels,
+                                                     mask_do_not_use_pixels=mask_do_not_use_pixels)
 
     # Get centroid positions.
     x1, y1 = centroids['xpos'].values, centroids['ypos'].values
@@ -711,19 +690,20 @@ def box_extract_miri(datafiles, centroids, extract_width, do_plot=False, show_pl
     # ===== Extraction ======
     # Do the extraction.
     fancyprint('Performing simple aperture extraction.')
-    flux, ferr = do_box_extraction(cube.transpose(0, 2, 1), ecube.transpose(0, 2, 1), x1,
-                                   width=extract_width, extract_start=int(np.min(y1)),
-                                   extract_end=int(np.max(y1)))
+    flux, ferr, dq_rep = do_box_extraction(cube.transpose(0, 2, 1), ecube.transpose(0, 2, 1), x1,
+                                           width=extract_width, extract_start=int(np.min(y1)),
+                                           extract_end=int(np.max(y1)), dq_report=dq_report,
+                                           dq_cube=None if dqcube is None else dqcube.transpose(0, 2, 1))
 
     # Get default 2D wavelength solution.
     wave = get_wave_miri(datafiles[0], centroids, cube.shape[0], cube.shape[1])
 
-    return wave, flux, ferr, extract_width
+    return wave, flux, ferr, dq_rep, extract_width
 
 
 def box_extract_nirspec(datafiles, centroids, extract_width, do_plot=False, show_plot=False,
-                        save_results=True, output_dir='./', mask_saturated_pixels=True,
-                        mask_do_not_use_pixels=True):
+                        save_results=True, output_dir='./', dq_report=False,
+                        mask_saturated_pixels=True, mask_do_not_use_pixels=True):
     """Perform a simple box aperture extraction on NIRSpec.
 
     Parameters
@@ -738,12 +718,13 @@ def box_extract_nirspec(datafiles, centroids, extract_width, do_plot=False, show
     do_plot : bool
         If True, do the step diagnostic plot.
     show_plot : bool
-        If True, show the step diagnostic plot instead of/in addition to
-        saving it to file.
+        If True, show the step diagnostic plot instead of/in addition to saving it to file.
     output_dir : str
         Directory to which to output results.
     save_results : bool
         If True, save results to file.
+    dq_report : bool
+        If True, return a report of relevant DQ flags in each aperture.
 
     Returns
     -------
@@ -753,15 +734,19 @@ def box_extract_nirspec(datafiles, centroids, extract_width, do_plot=False, show
         2D extracted flux.
     ferr: ndarray[float]
         2D flux errors.
+    dq_rep: ndarray[int]
+        DQ report.
     extract_width : int
         Optimized aperture width.
     """
 
     datafiles = np.atleast_1d(datafiles)
     det = utils.get_nrs_detector_name(datafiles[0])
-    cube, ecube = _load_box_extraction_cubes(datafiles,
-                                             mask_saturated_pixels=mask_saturated_pixels,
-                                             mask_do_not_use_pixels=mask_do_not_use_pixels)
+    subarray = utils.get_soss_subarray(datafiles[0])
+    grating = utils.get_nrs_grating(datafiles[0])
+    cube, ecube, dqcube = _load_box_extraction_cubes(datafiles,
+                                                     mask_saturated_pixels=mask_saturated_pixels,
+                                                     mask_do_not_use_pixels=mask_do_not_use_pixels)
 
     # Get centroid positions.
     x1, y1 = centroids['xpos'].values, centroids['ypos'].values
@@ -772,18 +757,7 @@ def box_extract_nirspec(datafiles, centroids, extract_width, do_plot=False, show
         # Extract with a variety of widths and find the one that minimizes the white light curve
         # scatter.
         scatter = []
-        if det == 'nrs1':
-            grating = utils.get_nrs_grating(datafiles[0])
-            if grating == 'G395H':
-                xstart = 500  # Trace starts at pixel ~500 for G395M
-            elif grating == 'G395M':
-                xstart = 200  # Trace starts at pixel ~200 for G395M
-            elif grating == 'PRISM':
-                xstart = 14  # Trace starts at pixel ~14 for PRISM
-            else:
-                raise ValueError('Unknown NIRSpec grating used...')
-        else:
-            xstart = 0
+        xstart = utils.get_nrs_trace_start(det, subarray, grating)
         for w in tqdm(range(1, 12)):
             flux = do_box_extraction(cube, ecube, y1, width=w, progress=False,
                                      extract_start=xstart)[0]
@@ -808,16 +782,15 @@ def box_extract_nirspec(datafiles, centroids, extract_width, do_plot=False, show
     # ===== Extraction ======
     # Do the extraction.
     fancyprint('Performing simple aperture extraction.')
-    det = utils.get_nrs_detector_name(datafiles[0])
-    subarray = utils.get_soss_subarray(datafiles[0])
-    grating = utils.get_nrs_grating(datafiles[0])
     xstart = utils.get_nrs_trace_start(det, subarray, grating)
-    flux, ferr = do_box_extraction(cube, ecube, y1, width=extract_width, extract_start=xstart)
+    flux, ferr, dq_rep = do_box_extraction(cube, ecube, y1, width=extract_width,
+                                           extract_start=xstart, dq_report=dq_report,
+                                           dq_cube=dqcube)
 
     # Get default 2D wavelength solution.
     wave = get_wave_nirspec(datafiles[0], centroids, cube.shape[0], cube.shape[2])
 
-    return wave, flux, ferr, extract_width
+    return wave, flux, ferr, dq_rep, extract_width
 
 
 def double_gaussian_extract_nirspec(datafiles, centroids, extract_width, separation_guess=4.0,
@@ -1318,8 +1291,8 @@ def decontaminate_nirspec_then_box_extract(datafiles, centroids, extract_width, 
             do_plot=False, show_plot=False, save_results=False, output_dir=output_dir
         )
     else:
-        flux, ferr = do_box_extraction(cube_decont, ecube, y1, width=extract_width,
-                                       extract_start=extract_start)
+        flux, ferr, _ = do_box_extraction(cube_decont, ecube, y1, width=extract_width,
+                                          extract_start=extract_start)
         wave = get_wave_nirspec(datafiles[0], centroids, cube.shape[0], cube.shape[2])
 
     if do_plot is True:
@@ -1337,7 +1310,7 @@ def decontaminate_nirspec_then_box_extract(datafiles, centroids, extract_width, 
 
 
 def box_extract_soss(datafiles, centroids, soss_width, soss_width_o2=None, do_plot=False,
-                     show_plot=False, save_results=True, output_dir='./',
+                     show_plot=False, save_results=True, output_dir='./', dq_report=False,
                      mask_saturated_pixels=True, mask_do_not_use_pixels=True):
     """Perform a simple box aperture extraction on SOSS orders 1 and 2.
 
@@ -1362,6 +1335,8 @@ def box_extract_soss(datafiles, centroids, soss_width, soss_width_o2=None, do_pl
         Directory to which to output results.
     save_results : bool
         If True, save results to file.
+    dq_report : bool
+        If True, return a report of relevant DQ flags in each aperture.
 
     Returns
     -------
@@ -1371,20 +1346,24 @@ def box_extract_soss(datafiles, centroids, soss_width, soss_width_o2=None, do_pl
         2D extracted flux for order 1.
     ferr_o1: array_like[float]
         2D flux errors for order 1.
+    dq_rep_o1: ndarray[int]
+        DQ report for order 1.
     wave_o2 : array_like[float]
         2D wavelength solution for order 2.
     flux_o2 : array_like[float]
         2D extracted flux for order 2.
     ferr_o2 : array_like[float]
         2D flux errors for order 2.
+    dq_rep_o2: ndarray[int]
+        DQ report for order 2.
     soss_width : int
         Optimized aperture width for order 1.
     """
 
     datafiles = np.atleast_1d(datafiles)
-    cube, ecube = _load_box_extraction_cubes(datafiles,
-                                             mask_saturated_pixels=mask_saturated_pixels,
-                                             mask_do_not_use_pixels=mask_do_not_use_pixels)
+    cube, ecube, dqcube = _load_box_extraction_cubes(datafiles,
+                                                     mask_saturated_pixels=mask_saturated_pixels,
+                                                     mask_do_not_use_pixels=mask_do_not_use_pixels)
 
     # Get centroid positions.
     x1 = centroids['xpos'].values
@@ -1429,14 +1408,18 @@ def box_extract_soss(datafiles, centroids, soss_width, soss_width_o2=None, do_pl
             # If None is passed for the order 2 extraction width, just use the same as order 1.
             if width is None:
                 width = soss_width
-            flux_o2, ferr_o2 = do_box_extraction(cube, ecube, y, width=width, extract_end=len(y))
+            flux_o2, ferr_o2, dq_rep_o2 = do_box_extraction(cube, ecube, y, width=width,
+                                                            extract_end=len(y),
+                                                            dq_report=dq_report, dq_cube=dqcube)
         else:
-            flux_o1, ferr_o1 = do_box_extraction(cube, ecube, y, width=width)
+            flux_o1, ferr_o1, dq_rep_o1 = do_box_extraction(cube, ecube, y, width=width,
+                                                            dq_report=dq_report, dq_cube=dqcube)
 
     # Get default wavelength solution.
-    wave_o1, wave_o2 = get_wave_soss(datafiles[0])
+    outdir = os.environ['CRDS_PATH'] + '/references/jwst/niriss/'
+    wave_o1, wave_o2 = get_wave_soss(datafiles[0], outdir)
 
-    return wave_o1, flux_o1, ferr_o1, wave_o2, flux_o2, ferr_o2, soss_width
+    return wave_o1, flux_o1, ferr_o1, dq_rep_o1, wave_o2, flux_o2, ferr_o2, dq_rep_o2, soss_width
 
 
 def double_gaussian_extract_soss(datafiles, centroids, soss_width, soss_width_o2=None,
@@ -1523,7 +1506,8 @@ def double_gaussian_extract_soss(datafiles, centroids, soss_width, soss_width_o2
         flux_o1_comp, ferr_o1_comp = flux1_o1, ferr1_o1
         flux_o2_comp, ferr_o2_comp = flux1_o2, ferr1_o2
 
-    wave_o1, wave_o2 = get_wave_soss(datafiles[0])
+    wave_o1, wave_o2 = get_wave_soss(datafiles[0],
+                                     os.environ['CRDS_PATH'] + '/references/jwst/niriss/')
 
     return {'wave_o1': wave_o1, 'flux_o1': flux_o1, 'ferr_o1': ferr_o1,
             'wave_o2': wave_o2, 'flux_o2': flux_o2, 'ferr_o2': ferr_o2,
@@ -1710,7 +1694,7 @@ def _fit_two_gaussian_profile(y, profile, profile_err, midpoint, edge_low, edge_
 
 
 def do_box_extraction(cube, err, ypos, width, extract_start=0, extract_end=None, progress=True,
-                      lower_width=None, upper_width=None):
+                      lower_width=None, upper_width=None, dq_report=False, dq_cube=None):
     """Do intrapixel aperture extraction.
 
     Parameters
@@ -1736,6 +1720,10 @@ def do_box_extraction(cube, err, ypos, width, extract_start=0, extract_end=None,
     upper_width : float, None
         Distance from the centroid to the upper aperture edge. If provided together with
         `lower_width`, overrides the symmetric interpretation of `width`.
+    dq_report : bool
+        If True, return a report of relevant DQ flags in each aperture.
+    dq_cube : array-like(int)
+        DQ flag cube.
 
     Returns
     -------
@@ -1743,6 +1731,8 @@ def do_box_extraction(cube, err, ypos, width, extract_start=0, extract_end=None,
         Extracted flux values.
     ferr : np.array(float)
          Extracted error values.
+    dq : np.array(int)
+        DQ report.
     """
 
     # Ensure data and errors are the same shape.
@@ -1753,8 +1743,18 @@ def do_box_extraction(cube, err, ypos, width, extract_start=0, extract_end=None,
     if extract_end is None:
         extract_end = dimx
 
+    # If making a DQ report for the extraction, unpack the relevant DQ flags.
+    if dq_report is True:
+        hot_pix = utils.get_dq_flag_metrics(dq_cube[10], ['HOT', 'WARM'])
+        dnu_pix = utils.get_dq_flag_metrics(dq_cube[10], ['DO_NOT_USE'])
+        sat_pix = utils.get_dq_flag_metrics(dq_cube[10], ['SATURATED'])
+        var_pix = utils.get_dq_flag_metrics(dq_cube[10], ['HIGH_VARIANCE'])
+
     # Initialize output arrays.
     f, ferr = np.zeros((nint, dimx)), np.zeros((nint, dimx))
+    dq = np.zeros(dimx)
+    if dq_report is False:
+        dq = -1*np.ones(dimx)
 
     # Determine the upper and lower edges of the extraction region. Cut at detector edges if
     # necessary.
@@ -1769,12 +1769,24 @@ def do_box_extraction(cube, err, ypos, width, extract_start=0, extract_end=None,
         if len(rows) == 0:
             continue
 
+        # Populate the DQ report using the pixels wholly within the aperture.
+        if dq_report is True:
+            whole = rows[weights >= 1]
+            if np.any(dnu_pix[whole, x]):
+                dq[x] += 1
+            if np.any(sat_pix[whole, x]):
+                dq[x] += 2
+            if np.any(hot_pix[whole, x]):
+                dq[x] += 4
+            if np.any(var_pix[whole, x]):
+                dq[x] += 8
+
         weighted_cube = cube[:, rows, x] * weights[None, :]
         weighted_err = err[:, rows, x] * weights[None, :]
         f[:, x] = np.nansum(weighted_cube, axis=1)
         ferr[:, x] = np.sqrt(np.nansum(weighted_err**2, axis=1))
 
-    return f, ferr
+    return f, ferr, dq
 
 
 def do_two_gaussian_extraction(cube, err, ypos, width, extract_start=0, extract_end=None,
@@ -1933,6 +1945,8 @@ def do_ccf(wave, flux, mod_flux, oversample=5):
     -------
     shift_wave : float
         Wavelength shift between the model and extracted spectrum in microns.
+    shift_steps : int
+        Pixel shift between the model and extracted spectrum.
     """
 
     def highpass_filter(signal, order=3, freq=0.05):
@@ -1941,13 +1955,28 @@ def do_ccf(wave, flux, mod_flux, oversample=5):
         signal_filt = filtfilt(b, a, signal)
         return signal_filt
 
+    def continuum_normalize(wave, flux):
+        """Rough continuum normalization."""
+        mask = np.isfinite(flux)
+        for i in range(10):
+            coeffs = chebyshev.chebfit(wave[mask], flux[mask], 4)
+            continuum = chebyshev.chebval(wave, coeffs)
+            resid = flux - continuum
+            sigma = np.std(resid[mask])
+            # Reject points well below and far above the fit.
+            mask = (resid > -1.5 * sigma) & (resid < 3 * sigma) & np.isfinite(flux)
+        coeffs = chebyshev.chebfit(wave[mask], flux[mask], 4)
+        continuum = chebyshev.chebval(wave, coeffs)
+        norm_flux = flux / continuum
+        return norm_flux
+
     # Ensure wavelengths are in ascending order
     ii = np.argsort(wave)
     thiswave = wave[ii]
     thisflux = flux[ii]
     thismod = mod_flux[ii]
 
-    # Interpolte both model and data onto a finer wavelength grid.
+    # Interpolate both model and data onto a finer wavelength grid.
     if oversample != 1:
         new_wave = []
         for i in range(len(thiswave)):
@@ -1957,6 +1986,7 @@ def do_ccf(wave, flux, mod_flux, oversample=5):
                 step /= oversample
                 for s in range(1, oversample):
                     new_wave.append(thiswave[i] + s * step)
+        new_wave = np.array(new_wave)
         thisflux = np.interp(new_wave, thiswave, thisflux)
         thismod = np.interp(new_wave, thiswave, thismod)
     else:
@@ -1967,6 +1997,9 @@ def do_ccf(wave, flux, mod_flux, oversample=5):
     thisflux = np.delete(thisflux, ii)
     thismod = np.delete(thismod, ii)
 
+    # Rough continuum normalization.
+    thisflux = continuum_normalize(new_wave, thisflux/np.nanmax(thisflux))
+    thismod = continuum_normalize(new_wave, thismod/np.nanmax(thismod))
     # Cross-correlate the model and observed stellar spectrum.
     ccf = correlate(highpass_filter(thisflux), highpass_filter(thismod))
     # Determine how many wavelength steps corresponds to the CCF peak.
@@ -1977,11 +2010,11 @@ def do_ccf(wave, flux, mod_flux, oversample=5):
     # And get the wavelength shift.
     shift_wave = -1*shift_steps*np.median(np.diff(new_wave))
 
-    return shift_wave
+    return shift_wave, shift_steps
 
 
 def do_optimal_extraction(cube, deepframe, ymin=0, ymax=None, xmin=0, xmax=None, max_iter=25,
-                          var_thresh=25):
+                          var_thresh=25, dq_report=False, dq_cube=None):
     """Optimally extract stellar spectra following the Horne 1986 algorithm.
 
     Parameters
@@ -2002,6 +2035,10 @@ def do_optimal_extraction(cube, deepframe, ymin=0, ymax=None, xmin=0, xmax=None,
         Maximum number of outlier rejection iterations to do.
     var_thresh : int
         Variance threshold for a pixel to be considered an outlier.
+    dq_report : bool
+        If True, return a report of relevant DQ flags in each aperture.
+    dq_cube : array-like(int)
+        DQ flag cube.
 
     Returns
     -------
@@ -2009,6 +2046,8 @@ def do_optimal_extraction(cube, deepframe, ymin=0, ymax=None, xmin=0, xmax=None,
         Optimally extracted flux.
     var_opt : ndarray(float)
         Variance in optimally extracted flux.
+    dq : np.array(int)
+        DQ report.
     """
 
     nint, dimy, dimx = np.shape(cube)
@@ -2044,7 +2083,7 @@ def do_optimal_extraction(cube, deepframe, ymin=0, ymax=None, xmin=0, xmax=None,
         var[:, ymin[xx]:ymax[xx], x] += (np.abs(flux[:, None, x] * prof[None, ymin[xx]:ymax[xx], x] + 0)) / 1
 
     # Optimal extraction - Step 8.
-    f_opt, var_opt = extract_optimal(prof, cube, var, ymin=ymin, ymax=ymax, xmin=xmin, xmax=xmax)
+    f_opt, var_opt, _ = extract_optimal(prof, cube, var, ymin=ymin, ymax=ymax, xmin=xmin, xmax=xmax)
 
     # Loop steps 6 - 8, iteratively clipped outliers.
     fancyprint('Doing iterative outlier clipping.')
@@ -2073,8 +2112,8 @@ def do_optimal_extraction(cube, deepframe, ymin=0, ymax=None, xmin=0, xmax=None,
         var[var == 0] = np.inf
 
         # Do optimal extraction.
-        f_opt, var_opt = extract_optimal(prof, cube, var, ymin=ymin, ymax=ymax, xmin=xmin,
-                                         xmax=xmax)
+        f_opt, var_opt, dq = extract_optimal(prof, cube, var, ymin=ymin, ymax=ymax, xmin=xmin,
+                                             xmax=xmax, dq_report=dq_report, dq_cube=dq_cube)
 
         # Break if we've hit a floor in the number of clipped pixels but haven't exceeded the
         # maximum iteration count.
@@ -2086,10 +2125,11 @@ def do_optimal_extraction(cube, deepframe, ymin=0, ymax=None, xmin=0, xmax=None,
             fancyprint('All outliers masked.')
             break
 
-    return f_opt, np.sqrt(var_opt)
+    return f_opt, np.sqrt(var_opt), dq
 
 
-def extract_optimal(prof, data, var, ymin=0, ymax=None, xmin=0, xmax=None):
+def extract_optimal(prof, data, var, ymin=0, ymax=None, xmin=0, xmax=None, dq_report=False,
+                    dq_cube=None):
     """Perform the optimal extraction following formula in Step 8 of Horne 1986.
 
     Parameters
@@ -2108,6 +2148,10 @@ def extract_optimal(prof, data, var, ymin=0, ymax=None, xmin=0, xmax=None):
         Minimum column number to extract.
     xmax : int, None
         Maximum column number to extract.
+    dq_report : bool
+        If True, return a report of relevant DQ flags in each aperture.
+    dq_cube : array-like(int)
+        DQ flag cube.
 
     Returns
     -------
@@ -2115,6 +2159,8 @@ def extract_optimal(prof, data, var, ymin=0, ymax=None, xmin=0, xmax=None):
         Optimally extracted flux.
     var_opt : ndarray(float)
         Variance in optimally extracted flux.
+    dq : np.array(int)
+        DQ report.
     """
 
     nint, dimy, dimx = np.shape(data)
@@ -2136,6 +2182,7 @@ def extract_optimal(prof, data, var, ymin=0, ymax=None, xmin=0, xmax=None):
         v = var[:, ymin:ymax, xmin:xmax]
         f_opt[:, xmin:xmax] = np.nansum(p * d / v, axis=1) / np.nansum(p ** 2 / v, axis=1)
         var_opt[:, xmin:xmax] = np.nansum(p, axis=1) / np.nansum(p ** 2 / v, axis=1)
+
     # For non-constant y-bounds.
     else:
         xdim_trim = prof[:, xmin:xmax].shape[1]
@@ -2149,7 +2196,34 @@ def extract_optimal(prof, data, var, ymin=0, ymax=None, xmin=0, xmax=None):
             f_opt[:, x] = np.nansum(p * d / v, axis=1) / np.nansum(p ** 2 / v, axis=1)
             var_opt[:, x] = np.nansum(p, axis=1) / np.nansum(p ** 2 / v, axis=1)
 
-    return f_opt, var_opt
+    if dq_report is True:
+        dq = np.zeros(dimx)
+        # Unpack relevant DQ flags.
+        hot_pix = utils.get_dq_flag_metrics(dq_cube[10], ['HOT', 'WARM'])
+        dnu_pix = utils.get_dq_flag_metrics(dq_cube[10], ['DO_NOT_USE'])
+        sat_pix = utils.get_dq_flag_metrics(dq_cube[10], ['SATURATED'])
+        var_pix = utils.get_dq_flag_metrics(dq_cube[10], ['HIGH_VARIANCE'])
+
+        # Populate the DQ report.
+        for x in range(xmin, xmax):
+            if len(ymin) == 1:
+                low_whole, up_whole = ymin[0], ymax[0]
+            else:
+                xx = x - xmin
+                low_whole, up_whole = ymin[xx], ymax[xx]
+
+            if np.any(dnu_pix[low_whole:up_whole, x]):
+                dq[x] += 1
+            if np.any(sat_pix[low_whole:up_whole, x]):
+                dq[x] += 2
+            if np.any(hot_pix[low_whole:up_whole, x]):
+                dq[x] += 4
+            if np.any(var_pix[low_whole:up_whole, x]):
+                dq[x] += 8
+    else:
+        dq = -1*np.ones(dimx)
+
+    return f_opt, var_opt, dq
 
 
 def flux_calibrate(spectrum_file):
@@ -2235,7 +2309,8 @@ def flux_calibrate_soss(spectrum_file, pwcpos, photom_path, spectrace_path, orde
 
 
 def format_miri_spectra(datafiles, times, extract_params, target_name, st_teff=None,
-                        st_logg=None, st_met=None, output_dir='./', save_results=True):
+                        st_logg=None, st_met=None, output_dir='./', save_results=True,
+                        clip_thresh=5):
     """Unpack the outputs of the 1D extraction and format them into
     lightcurves at the native detector resolution.
 
@@ -2259,6 +2334,8 @@ def format_miri_spectra(datafiles, times, extract_params, target_name, st_teff=N
         Stellar log surface gravity.
     st_met : float, None
         Stellar metallicity as [Fe/H].
+    clip_thresh : int
+        Threshold for sigma clipping.
 
     Returns
     -------
@@ -2271,41 +2348,14 @@ def format_miri_spectra(datafiles, times, extract_params, target_name, st_teff=N
     wave1d = datafiles[0][0]
     flux = datafiles[1]
     ferr = datafiles[2]
+    dq_report = datafiles[3]
 
     if st_teff is not None or st_logg is not None or st_met is not None:
         fancyprint('Wavelength calibration not implemented for MIRI.', msg_type='WARNING')
         fancyprint('Using the default wavelength solution.', msg_type='WARNING')
-    # Remove any NaN pixels --- important for NIRSpec NRS1.
-    # ii = np.where(np.isfinite(wave1d))[0]
-    # wave1d_trim = wave1d[ii]
-
-    # Now cross-correlate with stellar model --- skip for MIRI for now.
-    # if None in [st_teff, st_logg, st_met]:
-    #     fancyprint('Stellar parameters not provided. Using default wavelength solution.',
-    #                msg_type='WARNING')
-    # else:
-    #     fancyprint('Refining the wavelength calibration.')
-    #     # Create a grid of stellar parameters, and download PHOENIX spectra for each grid point.
-    #     thisout = output_dir + 'phoenix_models'
-    #     utils.verify_path(thisout)
-    #     res = utils.download_stellar_spectra(st_teff, st_logg, st_met, outdir=thisout)
-    #     wave_file, flux_files = res
-    #     # Interpolate model grid to correct stellar parameters.
-    #     # Reverse direction of both arrays since SOSS is extracted red to blue.
-    #     mod_flux = utils.interpolate_stellar_model_grid(flux_files, st_teff, st_logg, st_met)
-    #     mod_wave = fits.getdata(wave_file) / 1e4
-    #
-    #     # Bin model down to data wavelengths.
-    #     mod_flux = spectres.spectres(wave1d_trim, mod_wave, mod_flux)
-    #
-    #     # Cross-correlate extracted spectrum with model to refine wavelength calibration.
-    #     x1d_flux = np.nansum(flux, axis=0)[ii]
-    #     wave_shift = do_ccf(wave1d_trim, x1d_flux, mod_flux, oversample=1)
-    #     fancyprint('Found a wavelength shift of {}um'.format(wave_shift))
-    #     wave1d += wave_shift
 
     # Clip remaining 3-sigma outliers.
-    flux_clip = utils.sigma_clip_lightcurves(flux, window=11, thresh=3)
+    flux_clip = utils.sigma_clip_lightcurves(flux, window=10, thresh=clip_thresh)
 
     # Pack the lightcurves into the output format.
     # Put 1D extraction parameters in the output file header.
@@ -2316,21 +2366,23 @@ def format_miri_spectra(datafiles, times, extract_params, target_name, st_teff=N
     header_dict['Contents'] = 'Full resolution stellar spectra'
     header_dict['Method'] = extract_params['method']
     header_dict['Width'] = extract_params['extract_width']
+    header_dict['Inst'] = 'MIRI/LRS'
     # Calculate the limits of each wavelength bin.
     half_width = make_bins(wave1d)[1] / 2
 
     # Pack the stellar spectra and save to file if requested.
-    data = [wave1d, np.abs(half_width), flux_clip, ferr, times]
-    names = ['Wave', 'Wave Err', 'Flux', 'Flux Err', 'Time']
-    units = ['Micron', 'Micron', 'e/s', 'e/s', 'MJD_TDB']
+    data = [wave1d, np.abs(half_width), flux_clip, ferr, times, dq_report]
+    names = ['Wave', 'Wave Err', 'Flux', 'Flux Err', 'Time', 'DQ Report']
+    units = ['Micron', 'Micron', 'e/s', 'e/s', 'MJD_TDB', '1-DNU, 2-SAT, 4-HOT, 8-VAR']
     spectra = utils.save_extracted_spectra(filename, data, names, units, header_dict,
                                            header_comments, save_results=save_results)
 
     return spectra
 
 
-def format_nirspec_spectra(datafiles, times, extract_params, target_name, detector, st_teff=None,
-                           st_logg=None, st_met=None, output_dir='./', save_results=True):
+def format_nirspec_spectra(datafiles, times, extract_params, target_name, detector, grating,
+                           st_teff=None, st_logg=None, st_met=None, output_dir='./',
+                           save_results=True, clip_thresh=5):
     """Unpack the outputs of the 1D extraction and format them into
     lightcurves at the native detector resolution.
 
@@ -2350,12 +2402,16 @@ def format_nirspec_spectra(datafiles, times, extract_params, target_name, detect
         Name of the target.
     detector : str
         Detector name.
+    grating : str
+        Grating name.
     st_teff : float, None
         Stellar effective temperature.
     st_logg : float, None
         Stellar log surface gravity.
     st_met : float, None
         Stellar metallicity as [Fe/H].
+    clip_thresh : int
+        threshold for sigma clipping.
 
     Returns
     -------
@@ -2368,19 +2424,33 @@ def format_nirspec_spectra(datafiles, times, extract_params, target_name, detect
     wave1d = datafiles[0][0]
     flux = datafiles[1]
     ferr = datafiles[2]
-
-    # Remove any NaN pixels --- important for NIRSpec NRS1.
-    ii = np.where(np.isfinite(wave1d))[0]
-    wave1d_trim = wave1d[ii]
+    dq_report = datafiles[3]
 
     # Now cross-correlate with stellar model.
-    # If one or more of the stellar parameters are not provided, use the wavelength solution from
-    # pastasoss.
+    # If one or more of the stellar parameters are not provided, use the default solution.
     if None in [st_teff, st_logg, st_met]:
         fancyprint('Stellar parameters not provided. Using default wavelength solution.',
                    msg_type='WARNING')
     else:
         fancyprint('Refining the wavelength calibration.')
+        x1d_flux = np.nansum(flux, axis=0)
+        if detector.upper() == 'NRS1':
+            # Remove non-extracted columns --- important for NIRSpec NRS1.
+            if 'G395' in grating.upper():
+                ii = np.where(wave1d >= 3.1)[0]
+            elif 'G235' in grating.upper():
+                ii = np.where(wave1d >= 1.8)[0]
+            else:
+                ii = np.where(wave1d >= 1.0)[0]
+            wave1d_trim = wave1d[ii]
+            x1d_flux = x1d_flux[ii]
+        else:
+            wave1d_trim = wave1d
+        # Remove any NaN pixels --- important for NIRSpec NRS1.
+        ii = np.where(np.isfinite(wave1d_trim))[0]
+        wave1d_trim = wave1d_trim[ii]
+        x1d_flux = x1d_flux[ii]
+
         # Create a grid of stellar parameters, and download PHOENIX spectra for each grid point.
         thisout = output_dir + 'phoenix_models'
         utils.verify_path(thisout)
@@ -2395,13 +2465,12 @@ def format_nirspec_spectra(datafiles, times, extract_params, target_name, detect
         mod_flux = spectres.spectres(wave1d_trim, mod_wave, mod_flux)
 
         # Cross-correlate extracted spectrum with model to refine wavelength calibration.
-        x1d_flux = np.nansum(flux, axis=0)[ii]
-        wave_shift = do_ccf(wave1d_trim, x1d_flux, mod_flux, oversample=1)
-        fancyprint('Found a wavelength shift of {}um'.format(wave_shift))
+        wave_shift, pix_shift = do_ccf(wave1d_trim, x1d_flux, mod_flux, oversample=1)
+        fancyprint('Found a wavelength shift of {}um ({} pixels)'.format(wave_shift, pix_shift))
         wave1d += wave_shift
 
-    # Clip remaining 3-sigma outliers.
-    flux_clip = utils.sigma_clip_lightcurves(flux, window=11, thresh=3)
+    # Clip remaining outliers.
+    flux_clip = utils.sigma_clip_lightcurves(flux, window=10, thresh=clip_thresh)
 
     # Pack the lightcurves into the output format.
     # Put 1D extraction parameters in the output file header.
@@ -2412,13 +2481,14 @@ def format_nirspec_spectra(datafiles, times, extract_params, target_name, detect
     header_dict['Contents'] = 'Full resolution stellar spectra'
     header_dict['Method'] = extract_params['method']
     header_dict['Width'] = extract_params['extract_width']
+    header_dict['Inst'] = 'NIRSpec/BOTS'
     # Calculate the limits of each wavelength bin.
     half_width = make_bins(wave1d)[1] / 2
 
     # Pack the stellar spectra and save to file if requested.
-    data = [wave1d, np.abs(half_width), flux_clip, ferr, times]
-    names = ['Wave', 'Wave Err', 'Flux', 'Flux Err', 'Time']
-    units = ['Micron', 'Micron', 'e/s', 'e/s', 'MJD_TDB']
+    data = [wave1d, np.abs(half_width), flux_clip, ferr, times, dq_report]
+    names = ['Wave', 'Wave Err', 'Flux', 'Flux Err', 'Time', 'DQ Report']
+    units = ['Micron', 'Micron', 'e/s', 'e/s', 'MJD_TDB', '1-DNU, 2-SAT, 4-HOT, 8-VAR']
     spectra = utils.save_extracted_spectra(filename, data, names, units, header_dict,
                                            header_comments, save_results=save_results)
 
@@ -2427,7 +2497,7 @@ def format_nirspec_spectra(datafiles, times, extract_params, target_name, detect
 
 def format_soss_spectra(datafiles, times, extract_params, target_name, st_teff=None, st_logg=None,
                         st_met=None, pwcpos=None, output_dir='./', save_results=True,
-                        use_pastasoss=False):
+                        use_pastasoss=False, clip_thresh=5):
     """Unpack the outputs of the 1D extraction and format them into lightcurves at the native
     detector resolution.
 
@@ -2456,6 +2526,8 @@ def format_soss_spectra(datafiles, times, extract_params, target_name, st_teff=N
     use_pastasoss : bool
         If True, use pastasoss package to predict wavelength solution based on pupil wheel position.
         Note that this will only allow the extraction of order 2 from 0.6 - 0.85µm.
+    clip_thresh : int
+        Threshold for sigma clipping.
 
     Returns
     -------
@@ -2478,13 +2550,17 @@ def format_soss_spectra(datafiles, times, extract_params, target_name, st_teff=N
                               'ferr_o1': datafiles['ferr_o1_companion'],
                               'flux_o2': datafiles['flux_o2_companion'],
                               'ferr_o2': datafiles['ferr_o2_companion']}
+        dq_rep_o1 = datafiles.get('dq_rep_o1', -1 * np.ones_like(wave1d_o1))
+        dq_rep_o2 = datafiles.get('dq_rep_o2', -1 * np.ones_like(wave1d_o2))
     elif isinstance(datafiles, tuple):
         wave1d_o1 = datafiles[0]
         flux_o1 = datafiles[1]
         ferr_o1 = datafiles[2]
-        wave1d_o2 = datafiles[3]
-        flux_o2 = datafiles[4]
-        ferr_o2 = datafiles[5]
+        dq_rep_o1 = datafiles[3]
+        wave1d_o2 = datafiles[4]
+        flux_o2 = datafiles[5]
+        ferr_o2 = datafiles[6]
+        dq_rep_o2 = datafiles[7]
 
     # Whereas ATOCA extract outputs are in the atoca extract1dstep format.
     else:
@@ -2494,44 +2570,50 @@ def format_soss_spectra(datafiles, times, extract_params, target_name, st_teff=N
         for i, file in enumerate(datafiles):
             segment = utils.unpack_atoca_spectra(file)
             if i == 0:
-                wave2d_o1 = segment[1]['WAVELENGTH']
-                flux_o1 = segment[1]['FLUX']
-                ferr_o1 = segment[1]['FLUX_ERROR']
-                wave2d_o2 = segment[2]['WAVELENGTH']
-                flux_o2 = segment[2]['FLUX']
-                ferr_o2 = segment[2]['FLUX_ERROR']
+                wave2d_o1 = segment[1]['WAVELENGTH'][0]
+                flux_o1 = segment[1]['FLUX'][0]
+                ferr_o1 = segment[1]['FLUX_ERROR'][0]
+                wave2d_o2 = segment[2]['WAVELENGTH'][0]
+                flux_o2 = segment[2]['FLUX'][0]
+                ferr_o2 = segment[2]['FLUX_ERROR'][0]
             else:
-                wave2d_o1 = np.concatenate([wave2d_o1, segment[1]['WAVELENGTH']])
-                flux_o1 = np.concatenate([flux_o1, segment[1]['FLUX']])
-                ferr_o1 = np.concatenate([ferr_o1, segment[1]['FLUX_ERROR']])
-                wave2d_o2 = np.concatenate([wave2d_o2, segment[2]['WAVELENGTH']])
-                flux_o2 = np.concatenate([flux_o2, segment[2]['FLUX']])
-                ferr_o2 = np.concatenate([ferr_o2, segment[2]['FLUX_ERROR']])
+                wave2d_o1 = np.concatenate([wave2d_o1, segment[1]['WAVELENGTH'][0]])
+                flux_o1 = np.concatenate([flux_o1, segment[1]['FLUX'][0]])
+                ferr_o1 = np.concatenate([ferr_o1, segment[1]['FLUX_ERROR'][0]])
+                wave2d_o2 = np.concatenate([wave2d_o2, segment[2]['WAVELENGTH'][0]])
+                flux_o2 = np.concatenate([flux_o2, segment[2]['FLUX'][0]])
+                ferr_o2 = np.concatenate([ferr_o2, segment[2]['FLUX_ERROR'][0]])
         # Create 1D wavelength axes from the 2D wavelength solution.
         wave1d_o1, wave1d_o2 = wave2d_o1[0], wave2d_o2[0]
+        # No DQ Report for ATOCA
+        dq_rep_o1 = -1 * np.ones_like(wave1d_o1)
+        dq_rep_o2 = -1 * np.ones_like(wave1d_o2)
 
     # Refine wavelength solution.
     if use_pastasoss is True:
+        msg = 'PASTASOSS currently unvailable due to numpy dependency conflict with jwst v3.0.0.' \
+              'Falling back on the default wavelength solution.'
+        fancyprint(msg, msg_type='WARNING')
         # Use PASTASOSS to predict wavelength solution from pupil wheel position.
         # Note that PASTASOSS only predicts positions and thus wavelengths for order 2 bluewards of
         # ~0.9µm. Therefore, the whole frame cannot be extracted for order 2. PASTASOSS also does
         # not take into account any TA inaccuracies resulting in the position of the target trace
         # not being in the center of the frame - which will effect the resulting wavelength
         # solution.
-        fancyprint('Using PASTASOSS to predict wavelength solution.')
-        wave1d_o1 = pastasoss.get_soss_traces(pwcpos=pwcpos, order='1', interp=True).wavelength
-        soln_o2 = pastasoss.get_soss_traces(pwcpos=pwcpos, order='2', interp=True)
-        xpos_o2, wave1d_o2 = soln_o2.x.astype(int), soln_o2.wavelength
-        # Trim extracted quantities to match shapes of pastasoss quantities.
-        flux_o1 = flux_o1[:, 4:-4]
-        ferr_o1 = ferr_o1[:, 4:-4]
-        flux_o2 = flux_o2[:, xpos_o2]
-        ferr_o2 = ferr_o2[:, xpos_o2]
-        if companion_data is not None:
-            companion_data['flux_o1'] = companion_data['flux_o1'][:, 4:-4]
-            companion_data['ferr_o1'] = companion_data['ferr_o1'][:, 4:-4]
-            companion_data['flux_o2'] = companion_data['flux_o2'][:, xpos_o2]
-            companion_data['ferr_o2'] = companion_data['ferr_o2'][:, xpos_o2]
+        # fancyprint('Using PASTASOSS to predict wavelength solution.')
+        # wave1d_o1 = pastasoss.get_soss_traces(pwcpos=pwcpos, order='1', interp=True).wavelength
+        # soln_o2 = pastasoss.get_soss_traces(pwcpos=pwcpos, order='2', interp=True)
+        # xpos_o2, wave1d_o2 = soln_o2.x.astype(int), soln_o2.wavelength
+        # # Trim extracted quantities to match shapes of pastasoss quantities.
+        # flux_o1 = flux_o1[:, 4:-4]
+        # ferr_o1 = ferr_o1[:, 4:-4]
+        # flux_o2 = flux_o2[:, xpos_o2]
+        # ferr_o2 = ferr_o2[:, xpos_o2]
+        # if companion_data is not None:
+        #     companion_data['flux_o1'] = companion_data['flux_o1'][:, 4:-4]
+        #     companion_data['ferr_o1'] = companion_data['ferr_o1'][:, 4:-4]
+        #     companion_data['flux_o2'] = companion_data['flux_o2'][:, xpos_o2]
+        #     companion_data['ferr_o2'] = companion_data['ferr_o2'][:, xpos_o2]
 
     # Cross-correlate with stellar model.
     # If one or more of the stellar parameters are not provided, use the existing wavelength
@@ -2556,8 +2638,8 @@ def format_soss_spectra(datafiles, times, extract_params, target_name, st_teff=N
 
         # Cross-correlate extracted spectrum with model to refine wavelength calibration.
         x1d_flux = np.nansum(flux_o1, axis=0)
-        wave_shift = do_ccf(wave1d_o1, x1d_flux, mod_flux)
-        fancyprint('Found a wavelength shift of {}um'.format(wave_shift))
+        wave_shift, pix_shift = do_ccf(wave1d_o1, x1d_flux, mod_flux)
+        fancyprint('Found a wavelength shift of {}um ({} pixels)'.format(wave_shift, pix_shift))
         wave1d_o1 += wave_shift
         wave1d_o2 += wave_shift
 
@@ -2568,6 +2650,8 @@ def format_soss_spectra(datafiles, times, extract_params, target_name, st_teff=N
     flux_o2 = flux_o2[:, ::-1]
     ferr_o1 = ferr_o1[:, ::-1]
     ferr_o2 = ferr_o2[:, ::-1]
+    dq_rep_o1 = dq_rep_o1[::-1]
+    dq_rep_o2 = dq_rep_o2[::-1]
     if companion_data is not None:
         companion_data['flux_o1'] = companion_data['flux_o1'][:, ::-1]
         companion_data['flux_o2'] = companion_data['flux_o2'][:, ::-1]
@@ -2575,11 +2659,13 @@ def format_soss_spectra(datafiles, times, extract_params, target_name, st_teff=N
         companion_data['ferr_o2'] = companion_data['ferr_o2'][:, ::-1]
 
     # Clip remaining 5-sigma outliers.
-    flux_o1_clip = utils.sigma_clip_lightcurves(flux_o1)
-    flux_o2_clip = utils.sigma_clip_lightcurves(flux_o2)
+    flux_o1_clip = utils.sigma_clip_lightcurves(flux_o1, thresh=clip_thresh, window=10)
+    flux_o2_clip = utils.sigma_clip_lightcurves(flux_o2, thresh=clip_thresh, window=10)
     if companion_data is not None:
-        flux_o1_comp_clip = utils.sigma_clip_lightcurves(companion_data['flux_o1'])
-        flux_o2_comp_clip = utils.sigma_clip_lightcurves(companion_data['flux_o2'])
+        flux_o1_comp_clip = utils.sigma_clip_lightcurves(companion_data['flux_o1'],
+                                                         thresh=clip_thresh, window=10)
+        flux_o2_comp_clip = utils.sigma_clip_lightcurves(companion_data['flux_o2'],
+                                                         thresh=clip_thresh, window=10)
 
     # Pack the lightcurves into the output format.
     # Put 1D extraction parameters in the output file header.
@@ -2596,11 +2682,13 @@ def format_soss_spectra(datafiles, times, extract_params, target_name, st_teff=N
 
     # Pack the stellar spectra and save to file if requested.
     data = [wave1d_o1, np.abs(half_width_o1), flux_o1_clip, ferr_o1,
-            wave1d_o2, np.abs(half_width_o2), flux_o2_clip, ferr_o2, times]
+            wave1d_o2, np.abs(half_width_o2), flux_o2_clip, ferr_o2, times, dq_rep_o1, dq_rep_o2]
     names = ['Wave O1', 'Wave Err O1', 'Flux O1', 'Flux Err O1',
-             'Wave O2', 'Wave Err O2', 'Flux O2', 'Flux Err O2', 'Time']
+             'Wave O2', 'Wave Err O2', 'Flux O2', 'Flux Err O2', 'Time',
+             'DQ Report O1', 'DQ Report O2']
     units = ['Micron', 'Micron', 'DN/s', 'DN/s',
-             'Micron', 'Micron', 'DN/s', 'DN/s', 'MJD_TDB']
+             'Micron', 'Micron', 'DN/s', 'DN/s', 'MJD_TDB', '1-DNU, 2-SAT, 4-HOT, 8-VAR',
+             '1-DNU, 2-SAT, 4-HOT, 8-VAR']
     if companion_data is not None:
         data[8:8] = [flux_o1_comp_clip, companion_data['ferr_o1'],
                      flux_o2_comp_clip, companion_data['ferr_o2']]
@@ -2750,7 +2838,14 @@ def get_wave_nirspec(datafile, centroids, nint, nwave):
 
     # Get default 2D wavelength solution.
     with datamodels.open(datafile) as d:
-        wave2d = d.wavelength
+        if isinstance(d, datamodels.SlitModel):
+            wave2d = d.wavelength
+        else:
+            slit_wcs = nrs_wcs_set_input(d, 'S1600A1')  # Slit should always be S1600A1
+            _, dimy, dimx = d.data.shape
+            x, y = np.meshgrid(np.arange(dimx), np.arange(dimy))
+            wave2d = slit_wcs(x, y)[2]
+
     # Get 1D wavelengths at the locations of the trace centroids.
     wave1d = np.ones(nwave) * np.nan
     x1, y1 = centroids['xpos'].values, centroids['ypos'].values
@@ -2762,13 +2857,15 @@ def get_wave_nirspec(datafile, centroids, nint, nwave):
     return wave
 
 
-def get_wave_soss(datafile):
-    """Get the default NIRISS wavelngth solution.
+def get_wave_soss(datafile, outdir):
+    """Get the default NIRISS wavelength solution.
 
     Parameters
     ----------
     datafile : str
         Datafile from the observation.
+    outdir : str
+        Directory to which to save wavemap reference file.
 
     Returns
     -------
@@ -2778,8 +2875,10 @@ def get_wave_soss(datafile):
         2D wavelength solution for order 2
     """
 
-    step = calwebb_spec2.extract_1d_step.Extract1dStep()
-    wavemap = step.get_reference_file(datafile, 'wavemap')
+    subarray = utils.get_soss_subarray(datafile)
+    # Get the correct tracetable file for the subarray being used.
+    wavemap = utils.get_soss_wavemap(subarray, outdir)
+
     # Remove 20 pixel padding that is there for some reason.
     wave_o1 = np.mean(fits.getdata(wavemap, 1)[20:-20, 20:-20], axis=0)
     wave_o2 = np.mean(fits.getdata(wavemap, 2)[20:-20, 20:-20], axis=0)
@@ -2788,7 +2887,7 @@ def get_wave_soss(datafile):
 
 
 def optimal_extract_miri(datafiles, deepframe, centroids, extract_width=None, max_iter=25,
-                         var_thresh=25):
+                         var_thresh=25, dq_report=False):
     """Perform am optimal extraction on MIRI.
 
     Parameters
@@ -2805,7 +2904,8 @@ def optimal_extract_miri(datafiles, deepframe, centroids, extract_width=None, ma
         Maximum number of outlier rejection iterations to perform during extraction.
     var_thresh : int
         Variance threshold for a pixel to be flagged as an outlier.
-
+    dq_report : bool
+        If True, return a report of relevant DQ flags in each aperture.
 
     Returns
     -------
@@ -2815,20 +2915,29 @@ def optimal_extract_miri(datafiles, deepframe, centroids, extract_width=None, ma
         2D extracted flux.
     ferr: ndarray[float]
         2D flux errors.
+    dq_rep : ndarray[int]
+        DQ report.
     extract_width : int
         Optimized aperture width.
     """
 
     datafiles = np.atleast_1d(datafiles)
+    dqcube = None
     # Get flux to extract.
     for i, file in enumerate(datafiles):
         if isinstance(file, str):
             data = fits.getdata(file)
+            if dq_report is True:
+                dq = fits.getdata(file, 3)
         else:
             with utils.open_filetype(file) as datamodel:
                 data = datamodel.data
+                if dq_report is True:
+                    dq = datamodel.dq
         if i == 0:
             cube = data
+            if dq_report is True:
+                dqcube = dq
         else:
             cube = np.concatenate([cube, data])
 
@@ -2847,18 +2956,20 @@ def optimal_extract_miri(datafiles, deepframe, centroids, extract_width=None, ma
     # ===== Extraction ======
     # Do the extraction.
     fancyprint('Performing optimal extraction.')
-    flux, ferr = do_optimal_extraction(cube.transpose(0, 2, 1), deepframe.transpose(1, 0), ymin,
-                                       ymax, xmin=int(np.min(y1)), xmax=int(np.max(y1)+1),
-                                       max_iter=max_iter, var_thresh=var_thresh)
+    flux, ferr, dq_rep = do_optimal_extraction(cube.transpose(0, 2, 1), deepframe.transpose(1, 0),
+                                               ymin, ymax, xmin=int(np.min(y1)),
+                                               xmax=int(np.max(y1)+1), max_iter=max_iter,
+                                               var_thresh=var_thresh, dq_report=dq_report,
+                                               dq_cube=dqcube.transpose(0, 2, 1))
 
     # Get default 2D wavelength solution.
     wave = get_wave_miri(datafiles[0], centroids, cube.shape[0], cube.shape[1])
 
-    return wave, flux, ferr, extract_width
+    return wave, flux, ferr, dq_rep, extract_width
 
 
 def optimal_extract_nirspec(datafiles, deepframe, centroids, extract_width=None, max_iter=25,
-                            var_thresh=25):
+                            var_thresh=25, dq_report=False):
     """Perform am optimal extraction on NIRSpec.
 
     Parameters
@@ -2875,6 +2986,8 @@ def optimal_extract_nirspec(datafiles, deepframe, centroids, extract_width=None,
         Maximum number of outlier rejection iterations to perform during extraction.
     var_thresh : int
         Variance threshold for a pixel to be flagged as an outlier.
+    dq_report : bool
+        If True, return a report of relevant DQ flags in each aperture.
 
     Returns
     -------
@@ -2884,18 +2997,27 @@ def optimal_extract_nirspec(datafiles, deepframe, centroids, extract_width=None,
         2D extracted flux.
     ferr: ndarray[float]
         2D flux errors.
+    dq_rep : ndarray[int]
+        DQ report.
     """
 
     datafiles = np.atleast_1d(datafiles)
+    dqcube = None
     # Get flux to extract.
     for i, file in enumerate(datafiles):
         if isinstance(file, str):
             data = fits.getdata(file)
+            if dq_report is True:
+                dq = fits.getdata(file, 3)
         else:
             with utils.open_filetype(file) as datamodel:
                 data = datamodel.data
+                if dq_report is True:
+                    dq = datamodel.dq
         if i == 0:
             cube = data
+            if dq_report is True:
+                dqcube = dq
         else:
             cube = np.concatenate([cube, data])
 
@@ -2918,13 +3040,14 @@ def optimal_extract_nirspec(datafiles, deepframe, centroids, extract_width=None,
     subarray = utils.get_soss_subarray(datafiles[0])
     grating = utils.get_nrs_grating(datafiles[0])
     xstart = utils.get_nrs_trace_start(det, subarray, grating)
-    flux, ferr = do_optimal_extraction(cube, deepframe, ymin, ymax, xmin=xstart, max_iter=max_iter,
-                                       var_thresh=var_thresh)
+    flux, ferr, dq_rep = do_optimal_extraction(cube, deepframe, ymin, ymax, xmin=xstart,
+                                               max_iter=max_iter, var_thresh=var_thresh,
+                                               dq_report=dq_report, dq_cube=dqcube)
 
     # Get default 2D wavelength solution.
     wave = get_wave_nirspec(datafiles[0], centroids, cube.shape[0], cube.shape[2])
 
-    return wave, flux, ferr
+    return wave, flux, ferr, dq_rep
 
 
 def trace_spectrum(datafiles, deepframe, output_dir='./', save_results=True, fileroot_noseg='',
@@ -2970,9 +3093,9 @@ def trace_spectrum(datafiles, deepframe, output_dir='./', save_results=True, fil
     instrument = utils.get_instrument_name(datafiles[0])
     if instrument == 'NIRISS':
         subarray = utils.get_soss_subarray(datafiles[0])
-        # Get the most up to date trace table file.
-        step = calwebb_spec2.extract_1d_step.Extract1dStep()
-        tracetable = step.get_reference_file(datafiles[0], 'spectrace')
+        # Get the correct tracetable file for the subarray being used.
+        outdir = os.environ['CRDS_PATH'] + '/references/jwst/niriss/'
+        tracetable = utils.get_soss_tracetable(subarray, outdir)
         # Get centroids via the edgetrigger method.
         save_filename = output_dir + fileroot_noseg
         centroids = utils.get_centroids_soss(deepframe, tracetable, subarray,
