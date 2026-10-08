@@ -1,7 +1,6 @@
 # General optimizer template.
 #
-# Active defaults are for NIRISS/SOSS and use the threshold sweeps from
-# run_optimize_niriss.yaml. NIRSpec and MIRI alternatives are shown in comments
+# Active defaults are for NIRISS/SOSS. NIRSpec and MIRI alternatives are shown in comments
 # next to the values that usually need to change.
 
 # ===== Key Parameters =====
@@ -9,7 +8,7 @@ crds_cache_path : './crds_cache/'
 crds_context: 'jwst_1322.pmap'
 
 input_dir : 'DMS_uncal/' # input folder containing *uncal.fits
-pipeline_outputs_directory : 'pipeline_outputs_directory/' # output folder
+pipeline_outputs_directory : 'pipeline_outputs_directory' # output folder
 input_filetag : 'uncal'
 
 # Instrument mode used.
@@ -152,9 +151,9 @@ soss_outer_mask_width : [66,68,70,72,74] # fixed default: 70
 
 # NIRSpec only. To optimize NIRSpec, set optimize_nirspec_mask_width: True.
 optimize_nirspec_mask_width : False
-nirspec_mask_width : 0 # NIRSpec sweep option: [10,12,14,16,18,20]
+nirspec_mask_width : 16 # NIRSpec sweep option: [10,12,14,16,18,20]
 
-# Shared jump-detection thresholds from run_optimize_niriss.yaml.
+# Shared jump-detection thresholds.
 optimize_time_jump_threshold : True
 time_jump_threshold : [5,6,7,8,9,10]
 
@@ -165,12 +164,12 @@ time_window : [3,5,7,9,11]
 # ===== Stage 2 Parameters To Sweep =====
 # MIRI only. To optimize MIRI, set these optimize flags True.
 optimize_miri_trace_width : False
-miri_trace_width : 0 # MIRI sweep option: [14,16,18,20,22]
+miri_trace_width : 20 # MIRI sweep option: [14,16,18,20,22]
 
 optimize_miri_background_width : False
-miri_background_width : 0 # MIRI sweep option: [10,11,12,13,14]
+miri_background_width : 14 # MIRI sweep option: [10,11,12,13,14]
 
-# Shared bad-pixel thresholds from run_optimize_niriss.yaml.
+# Shared bad-pixel thresholds.
 optimize_space_outlier_threshold : True
 space_outlier_threshold : [5,6,7,8,9,10,11]
 

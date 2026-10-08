@@ -63,17 +63,26 @@ from exotedrf.optimize_helpers import extract_at_step
 
 base_outdir = cfg_early.get('pipeline_outputs_directory', 'pipeline_outputs_directory')
 
+# The stages write to pipeline_outputs_directory + '_' + output_tag (expanding '~'), so mirror
+# that here so cached outputs are found and invalidated in the right place.
+_output_tag = cfg_early.get('output_tag') or ''
+_output_tag = '_' + _output_tag if _output_tag != '' else ''
+if os.path.isabs(base_outdir) or base_outdir.startswith('~'):
+    full_outdir = os.path.expanduser(base_outdir) + _output_tag
+else:
+    full_outdir = os.path.join('./', base_outdir + _output_tag)
+
 # Define where to store outputs for each pipeline stage
-outdir    = base_outdir                      
-outdir_f  = f'{base_outdir}/Files'          
-outdir_s1 = f'{base_outdir}/Stage1/'       
-outdir_s2 = f'{base_outdir}/Stage2/'           
-outdir_s3 = f'{base_outdir}/Stage3/'      
-utils.verify_path(base_outdir)
-utils.verify_path(f'{base_outdir}/Files')
-utils.verify_path(f'{base_outdir}/Stage1')
-utils.verify_path(f'{base_outdir}/Stage2')
-utils.verify_path(f'{base_outdir}/Stage3')
+outdir    = full_outdir
+outdir_f  = os.path.join(full_outdir, 'Files')
+outdir_s1 = os.path.join(full_outdir, 'Stage1/')
+outdir_s2 = os.path.join(full_outdir, 'Stage2/')
+outdir_s3 = os.path.join(full_outdir, 'Stage3/')
+utils.verify_path(full_outdir)
+utils.verify_path(outdir_f)
+utils.verify_path(outdir_s1)
+utils.verify_path(outdir_s2)
+utils.verify_path(outdir_s3)
 
 # ======== OBSERVING CONFIG PARAMETERS ========
 # Observation mode in lowercase (e.g., 'niriss', 'nirspec', 'miri')
@@ -410,6 +419,34 @@ def make_step_filenames(input_files, output_dir, possible_steps,
 
 
 # cost function (P2P-based)
+SOSS_ORDER_CUTOFF = 0.85  # μm — wavelength boundary between O2 and O1 segments
+
+
+def stitch_soss_orders(wave_O1, wave_O2, flux_O1=None, flux_O2=None, cutoff=SOSS_ORDER_CUTOFF):
+    """Stitch SOSS order 2 (<= cutoff) and order 1 (> cutoff) onto one wavelength axis.
+
+    Selection is by wavelength, not by edge index, since SOSS wavelengths decrease with detector
+    column before Stage 3 formatting. Returned arrays are sorted by wavelength.
+    """
+
+    wave_O1 = np.asarray(wave_O1, float)
+    wave_O2 = np.asarray(wave_O2, float)
+    i2 = np.where(wave_O2 <= cutoff)[0]
+    i1 = np.where(wave_O1 > cutoff)[0]
+    if i2.size == 0 or i1.size == 0:
+        raise ValueError("Cutoff produces empty segment: "
+                         f"O2<= {cutoff}: {i2.size}, O1> {cutoff}: {i1.size}")
+
+    wave = np.concatenate([wave_O2[i2], wave_O1[i1]])
+    s = np.argsort(wave, kind='mergesort')
+    wave = wave[s]
+    if flux_O1 is None or flux_O2 is None:
+        return wave, None
+    flux = np.concatenate([np.asarray(flux_O2, float)[:, i2],
+                           np.asarray(flux_O1, float)[:, i1]], axis=1)
+    return wave, flux[:, s]
+
+
 def cost_function(st3, baseline_ints=None, wave_range=None, w1=0.0, w2=1.0, tol=0.05):
     """
     Compute a combined white-light + spectral P2P (point-to-point) metric.
@@ -439,33 +476,8 @@ def cost_function(st3, baseline_ints=None, wave_range=None, w1=0.0, w2=1.0, tol=
 
     # ======== NIRISS-SPECIFIC WAVE + FLUX MERGE ========
     if 'niriss' in obs_early:
-        flux_O1 = np.asarray(st3['Flux O1'], float)  # Order 1 flux
-        flux_O2 = np.asarray(st3['Flux O2'], float)  # Order 2 flux
-        wave_O1 = np.asarray(st3['Wave O1'], float)  # Order 1 wavelengths
-        wave_O2 = np.asarray(st3['Wave O2'], float)  # Order 2 wavelengths
-
-        cutoff = 0.85  # μm — wavelength boundary between O2 and O1 segments
-
-        # Find O2 indices up to cutoff
-        i2 = np.where(wave_O2 <= cutoff)[0]
-        # Find O1 indices above cutoff
-        i1 = np.where(wave_O1 > cutoff)[0]
-
-        if i2.size == 0 or i1.size == 0:
-            raise ValueError("Cutoff produces empty segment: "
-                             f"O2<= {cutoff}: {i2.size}, O1> {cutoff}: {i1.size}")
-
-        idx2 = i2[-1]  # last valid O2 index
-        idx1 = i1[0]   # first valid O1 index
-
-        # Concatenate O2 segment + O1 segment along wavelength axis
-        wave = np.concatenate([wave_O2[:idx2+1],        wave_O1[idx1:]])
-        flux = np.concatenate([flux_O2[:, :idx2+1],     flux_O1[:, idx1:]], axis=1)
-
-        # Sort by wavelength just in case
-        s = np.argsort(wave)
-        wave = wave[s]
-        flux = flux[:, s]
+        wave, flux = stitch_soss_orders(st3['Wave O1'], st3['Wave O2'],
+                                        st3['Flux O1'], st3['Flux O2'])
 
     else:
         # For non-NIRISS: take flux/wave arrays directly
@@ -507,9 +519,18 @@ def cost_function(st3, baseline_ints=None, wave_range=None, w1=0.0, w2=1.0, tol=
         ptp2_spec_wave = np.nanmedian(np.abs(d2_spec[:N]), axis=0)
     elif len(baseline_ints) == 2:
         Nlow, Nhigh = map(int, baseline_ints)
-        low_term  = np.nanmedian(np.abs(d2_spec[:Nlow]), axis=0)
-        high_term = np.nanmedian(np.abs(d2_spec[Nhigh:]), axis=0)
-        ptp2_spec_wave = 0.5 * (low_term + high_term)
+        low, high = d2_spec[:Nlow], d2_spec[Nhigh:]
+        # Phase 1 only uses the first segment, so a positive Nhigh can lie beyond its end. Fall
+        # back on whichever baseline is available rather than returning an all-NaN metric.
+        if len(low) > 0 and len(high) > 0:
+            low_term  = np.nanmedian(np.abs(low), axis=0)
+            high_term = np.nanmedian(np.abs(high), axis=0)
+            ptp2_spec_wave = 0.5 * (low_term + high_term)
+        elif len(low) > 0 or len(high) > 0:
+            ptp2_spec_wave = np.nanmedian(np.abs(low if len(low) > 0 else high), axis=0)
+        else:
+            raise ValueError(f"baseline_ints {baseline_ints} select no integrations "
+                             f"(only {len(d2_spec) + 2} available).")
     else:
         raise ValueError(f"baseline_ints must be length 1 or 2, got {len(baseline_ints)}")
 
@@ -620,27 +641,9 @@ def diagnostic_plot(st3, name_str, baseline_ints, outdir=outdir_f):
 
     # --- Build stitched spectrum ---
     if 'niriss' in obs_early:
-        # Load flux and wavelength for both spectral orders
-        flux_O1 = np.asarray(st3['Flux O1'], float)
-        flux_O2 = np.asarray(st3['Flux O2'], float)
-        wave_O1 = np.asarray(st3['Wave O1'], float)
-        wave_O2 = np.asarray(st3['Wave O2'], float)
-
-        # Cutoff wavelength separating orders
-        cutoff = 0.85  # µm
-
-        # Indices: O2 wavelengths ≤ cutoff, O1 wavelengths > cutoff
-        i2 = np.where(wave_O2 <= cutoff)[0]
-        i1 = np.where(wave_O1 > cutoff)[0]
-        if i2.size == 0 or i1.size == 0:
-            raise ValueError(
-                f"Cutoff {cutoff} yields empty segment: "
-                f"O2<= {i2.size}, O1> {i1.size}"
-            )
-
-        # Concatenate both orders along wavelength axis
-        wave = np.concatenate([wave_O2[:i2[-1]+1], wave_O1[i1[0]:]])
-        flux = np.concatenate([flux_O2[:, :i2[-1]+1], flux_O1[:, i1[0]:]], axis=1)
+        # Stitch both spectral orders onto one wavelength axis
+        wave, flux = stitch_soss_orders(st3['Wave O1'], st3['Wave O2'],
+                                        st3['Flux O1'], st3['Flux O2'])
     else:
         # Non-NIRISS: directly load single flux/wavelength arrays
         flux = np.asarray(st3['Flux'], float)
@@ -809,13 +812,18 @@ def plot_scatter(
 
         # Special handling for NIRISS with two orders - plot separately
         if ("Wave_O1" in name_map) and ("Wave_O2" in name_map):
+            # Scatter rows are on the stitched, wavelength-sorted axis used by cost_function.
             wave_O1 = np.asarray(name_map["Wave_O1"].data, float)
             wave_O2 = np.asarray(name_map["Wave_O2"].data, float)
+            if wave_O1.ndim == 2:
+                wave_O1 = np.nanmedian(wave_O1, axis=0)
+                wave_O2 = np.nanmedian(wave_O2, axis=0)
+            wave_stitched = stitch_soss_orders(wave_O1, wave_O2)[0]
             is_niriss_two_orders = True
-            # Store both orders separately
+            # Plot each order's segment of the stitched axis separately
             orders = [
-                {'wave': wave_O2, 'name': 'Order 2'},
-                {'wave': wave_O1, 'name': 'Order 1'}
+                {'sel': wave_stitched <= SOSS_ORDER_CUTOFF, 'name': 'Order 2'},
+                {'sel': wave_stitched > SOSS_ORDER_CUTOFF, 'name': 'Order 1'}
             ]
         else:
             # Fallback: read first extension array as wavelength grid
@@ -826,37 +834,30 @@ def plot_scatter(
     if is_niriss_two_orders:
         fig, axes = plt.subplots(1, 2, figsize=(16, 4))
 
-        col_offset = 0  # Track column offset in scatter data
+        if wave_stitched.size != n_cols:
+            raise ValueError(f"Stitched SOSS wavelength axis ({wave_stitched.size}) does not match "
+                             f"scatter columns ({n_cols}).")
         for idx, order_info in enumerate(orders):
             ax = axes[idx]
-            wave_order = order_info['wave']
             order_name = order_info['name']
-            n_wave = len(wave_order)
 
-            # Sort wavelengths
-            s = np.argsort(wave_order, kind="mergesort")
-            wave_sorted = wave_order[s]
-
-            # Build mask for wavelength range
+            # Build mask for this order's segment and the wavelength range
+            mask = order_info['sel'] & np.isfinite(wave_stitched)
             if wave_range is not None:
                 wmin, wmax = wave_range
-                mask = np.isfinite(wave_sorted) & (wave_sorted >= wmin - tol) & (wave_sorted <= wmax + tol)
-            else:
-                mask = np.isfinite(wave_sorted)
+                mask &= (wave_stitched >= wmin - tol) & (wave_stitched <= wmax + tol)
 
             if not mask.any():
                 fancyprint(f"Warning: No finite wavelengths in {order_name} within range {wave_range}", msg_type='WARNING')
-                col_offset += n_wave
                 continue
 
-            x = wave_sorted[mask]
+            x = wave_stitched[mask]
 
             # Plot each valid row
             for i in valid:
                 # Extract data for this order from scatter table
-                y_full = df.iloc[i, col_offset:col_offset+n_wave].to_numpy(float)
-                y_ord = y_full[s]
-                y_raw = (y_ord[mask]) * 1e6
+                y_full = df.iloc[i, :].to_numpy(float)
+                y_raw = (y_full[mask]) * 1e6
 
                 if style == 'line':
                     ax.plot(x, y_raw, linewidth=0.6, linestyle='-', alpha=0.5,
@@ -883,8 +884,6 @@ def plot_scatter(
             ax.grid(True, alpha=0.3)
             if idx == 0:
                 ax.legend(fontsize=8)
-
-            col_offset += n_wave
 
         plt.tight_layout()
         if save_path:
@@ -1103,8 +1102,9 @@ def load_ad_hoc_centroids(cfg, stage2_source_dir=None):
     return None
 
 
-def resolve_existing_centroids(cfg):
-    """Resolve the centroid table for a Stage 3 extraction or rerun."""
+def resolve_existing_centroids(cfg, fileroot_noseg=None):
+    """Resolve the centroid table for a Stage 3 extraction or rerun. If `fileroot_noseg` is
+    given, only centroid tables written for that dataset are considered."""
 
     centroids_path = cfg.get('centroids')
     if centroids_path not in [None, 'None', 'null', '']:
@@ -1118,7 +1118,10 @@ def resolve_existing_centroids(cfg):
         (outdir_s2, 'Stage 2'),
     ]
     for outdir, label in centroid_patterns:
-        centroid_files = sorted(glob.glob(f'{outdir}*centroids.csv'))
+        if fileroot_noseg is not None:
+            centroid_files = sorted(glob.glob(f'{outdir}{glob.escape(fileroot_noseg)}centroids.csv'))
+        else:
+            centroid_files = sorted(glob.glob(f'{outdir}*centroids.csv'))
         if centroid_files:
             fancyprint(f"  Loading centroids from {label}: {centroid_files[0]}")
             return pd.read_csv(centroid_files[0], comment='#')
@@ -1265,7 +1268,7 @@ def find_best_logged_extract_width(name_str):
 
     cost = pd.to_numeric(df['cost'], errors='coerce')
     valid = cost.notna() & (df['extract_width'].astype(str).str.strip() != '')
-    if valid.any() is not True:
+    if not valid.any():
         raise ValueError(f"{cost_path} does not contain any valid logged extract_width values.")
 
     best_idx = cost[valid].idxmin()
@@ -1355,30 +1358,51 @@ def select_best_trial(costs, param_name='parameter'):
     return best_idx
 
 
+# Cached step outputs downstream of each checkpoint. These must be invalidated together with the
+# checkpoint's own outputs, otherwise a reused output directory (e.g., from a previous run) would
+# feed stale downstream products into later sweeps.
+_STAGE1_AFTER_1OVERF = ['linearitystep', 'jump', 'rampfitstep', 'gainscalestep']
+_STAGE2_ALL = ['assignwcsstep', 'extract2dstep', 'sourcetypestep', 'wavecorrstep',
+               'flatfieldstep', 'photomstep', 'backgroundstep', 'oneoverfstep', 'badpixstep',
+               'pcareconstructstep']
+_STAGE2_AFTER_BKG = ['oneoverfstep', 'badpixstep', 'pcareconstructstep']
+
+
 def delete_checkpoint_outputs(checkpoint_name, outdir_s1, outdir_s2):
-    """Delete a checkpoint step's cached outputs so the next pipeline call
-    recomputes that step (and, lazily, everything downstream of it)."""
+    """Delete a checkpoint step's cached outputs, and those of every step downstream of it, so
+    the next pipeline call recomputes them."""
     patterns = []
+    downstream = []
     if checkpoint_name == 'OneOverFStep_grp':
         patterns.append(f"{outdir_s1}*_oneoverfstep.fits")
+        downstream += [f"{outdir_s1}*_{t}.fits" for t in _STAGE1_AFTER_1OVERF]
+        downstream += [f"{outdir_s2}*_{t}.fits" for t in _STAGE2_ALL]
+        downstream.append(f"{outdir_s2}*hot_pixels.npy")
     elif checkpoint_name == 'JumpStep':
         patterns.append(f"{outdir_s1}*_jump.fits")
+        downstream += [f"{outdir_s1}*_{t}.fits" for t in ['rampfitstep', 'gainscalestep']]
+        downstream += [f"{outdir_s2}*_{t}.fits" for t in _STAGE2_ALL]
+        downstream.append(f"{outdir_s2}*hot_pixels.npy")
     elif checkpoint_name == 'BackgroundStep':
         patterns.append(f"{outdir_s2}*_backgroundstep.fits")
+        downstream += [f"{outdir_s2}*_{t}.fits" for t in _STAGE2_AFTER_BKG]
+        downstream.append(f"{outdir_s2}*hot_pixels.npy")
     elif checkpoint_name == 'BadPixStep':
         patterns.append(f"{outdir_s2}*_badpixstep.fits")
         # Also delete cached hot_pixels.npy to force spatial outlier
         # redetection with new parameters (space_thresh, box_size).
         patterns.append(f"{outdir_s2}*hot_pixels.npy")
+        downstream.append(f"{outdir_s2}*_pcareconstructstep.fits")
     deleted = 0
-    for pattern in patterns:
+    for pattern in patterns + downstream:
         files_to_delete = glob.glob(pattern)
         if files_to_delete:
             fancyprint(f"Deleting {len(files_to_delete)} cached file(s) for {checkpoint_name}:")
         for cached_file in files_to_delete:
             fancyprint(f"  Deleting: {cached_file}")
             os.remove(cached_file)
-            deleted += 1
+            if pattern in patterns:
+                deleted += 1
     if patterns and deleted == 0:
         fancyprint(f"WARNING: No cached files found matching: {patterns}", msg_type='WARNING')
 
@@ -1492,10 +1516,14 @@ def run_ad_hoc_extract_width_search(stage2_inputs, cfg, centroids, deepframe, ba
 def main():
     # ===== SETUP =====
     parser = argparse.ArgumentParser(description="exoTEDRF Optimizer")
-    parser.add_argument("--config", default="run_optimize.yaml", help="Config YAML")
+    parser.add_argument("--config", "-c", default="run_optimize.yaml", help="Config YAML")
     args = parser.parse_args()
 
     cfg = parse_config(args.config)
+    # Fail fast rather than after Phase 1: Stage 3 only supports these extraction methods.
+    if cfg.get('extract_method') not in ['box', 'atoca', 'optimal']:
+        raise ValueError("extract_method must be one of 'box', 'atoca', or 'optimal'; got "
+                         "{!r}.".format(cfg.get('extract_method')))
     obs = (cfg.get('observing_mode') or '').lower()
     filter_det = (cfg.get('filter_detector') or '').lower()
     instrument = obs.split('/')[0].upper() if '/' in obs else obs.upper()
@@ -1801,8 +1829,9 @@ def main():
                     raise ValueError(f"{param_name} must be single value when optimize_{param_name}=False")
                 fixed_params[param_name] = val
 
-    # Initialize with mean values (?)
-    current_best = {k: int(np.mean(v)) for k, v in param_ranges.items()}
+    # Initialize swept parameters with the middle candidate until their own sweep runs (an
+    # int-truncated mean can fall outside the candidate list, e.g. for float thresholds).
+    current_best = {k: v[len(v) // 2] for k, v in param_ranges.items()}
     current_best.update(fixed_params)
 
     logf = open(f"{outdir_f}/Cost_{name_str}.txt", "w")
@@ -2235,8 +2264,12 @@ def main():
     logs.close()
 
  
-    fancyprint("\n=== Plotting optimization results ===")
-    plot_cost(name_str)
+    # Only plot if Phase 1 actually logged a sweep (e.g., not when only extract_width is
+    # being optimized).
+    phase1_costs = pd.read_csv(f"{outdir_f}/Cost_{name_str}.txt", sep="\t")
+    if len(phase1_costs) > 0:
+        fancyprint("\n=== Plotting optimization results ===")
+        plot_cost(name_str)
 
     # ===== PHASE 2: FULL PIPELINE WITH OPTIMAL PARAMETERS =====
     fancyprint(f"\n{'='*60}")
@@ -2347,15 +2380,19 @@ def main():
     # new_stage2.run_stage2 now returns (results, deepframe), not centroids.
     # If no centroids are explicitly provided (or already saved on disk), let new_stage3 trace
     # them directly from the deepframe during Stage 3 extraction.
+    # Only consider centroid tables written for this dataset (e.g., not the other NIRSpec
+    # detector's when NRS1 and NRS2 share an output directory).
+    final_fileroot = utils.get_filename_root_noseg(utils.get_filename_root(stage2_results))
     try:
-        this_centroid = resolve_existing_centroids(final_cfg)
+        this_centroid = resolve_existing_centroids(final_cfg, fileroot_noseg=final_fileroot)
     except FileNotFoundError:
         fancyprint("No Stage 3 or Stage 2 centroid table found. Stage 3 will trace centroids "
                    "from the deepframe.")
         this_centroid = None
 
-    this_deepframe = resolve_ad_hoc_deepframe(final_cfg)
-    if this_deepframe is None:
+    # Use the deepframe Stage 2 just produced unless one is explicitly set in the config.
+    this_deepframe = final_cfg.get('deepframe')
+    if this_deepframe in [None, 'None', 'null', '']:
         this_deepframe = final_deepframe
 
     # ===== OPTIMIZE EXTRACT_WIDTH IF REQUESTED =====
@@ -2500,18 +2537,19 @@ def main():
     #  diagnostics
     diagnostic_plot(stage3_results, name_str, baseline_ints=baseline_ints, outdir=outdir_f)
 
-    #  scatter plot
-    outfile = os.path.join(outdir_f, f"Scatter_{name_str}.txt")
+    #  scatter plot of the final Stage 3 spectrum. Phase 1 costs are computed on a single segment
+    #  (and possibly a single group), so they are not comparable with the full-dataset Stage 3
+    #  products and must not be plotted on the final wavelength axis.
+    _, final_scatter = cost_function(stage3_results, baseline_ints=baseline_ints,
+                                     wave_range=wave_range, w1=w1, w2=w2)
+    outfile = os.path.join(outdir_f, f"Scatter_final_{name_str}.txt")
+    with open(outfile, "w") as f:
+        f.write(" ".join(f"{x:.10g}" for x in final_scatter) + "\n")
     specfile = find_stage3_spectrum_file(final_cfg['extract_method'])
-    cost_df = pd.read_csv(os.path.join(outdir_f, f"Cost_{name_str}.txt"), sep="\t")
-    numeric_cost = pd.to_numeric(cost_df['cost'], errors='coerce')
-    if numeric_cost.notna().any() is not True:
-        raise ValueError(f"No finite numeric costs found in Cost_{name_str}.txt")
-    best_idx = numeric_cost.idxmin()
 
     plot_scatter(
         txtfile=outfile,
-        rows=[best_idx],
+        rows=[0],
         wave_range=wave_range_plot,
         smooth=10,
         spectrum_files=[specfile],
@@ -2529,12 +2567,8 @@ def main():
 
         import shutil
 
-        # Construct full output directory path (base_outdir + output_tag)
-        if cfg['output_tag'] != '':
-            output_tag_full = '_' + cfg['output_tag']
-        else:
-            output_tag_full = ''
-        full_output_dir = base_outdir + output_tag_full
+        # Full output directory path (pipeline_outputs_directory + output_tag)
+        full_output_dir = full_outdir
 
         # Get input directory
         input_dir = cfg['input_dir']

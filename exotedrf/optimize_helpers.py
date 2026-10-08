@@ -17,6 +17,12 @@ from exotedrf.stage3 import get_wave_soss, trace_spectrum, do_two_gaussian_extra
 import matplotlib.pyplot as plt
 
 
+def _soss_ref_dir():
+    """Directory used by the Stage 1-3 steps for SOSS tracetable/wavemap reference files."""
+
+    return os.environ['CRDS_PATH'] + '/references/jwst/niriss/'
+
+
 def _parse_width(width):
     """Normalize symmetric and asymmetric widths for optimizer-side extraction."""
 
@@ -163,14 +169,18 @@ def apply_dq_flags(datafiles):
                     dq_for_mask = dq
                 elif dq.ndim == 2:
                     fancyprint(f'  DQ is 2D (PIXELDQ), broadcasting to data shape')
-                    bad_pixels = (dq > 0).astype(bool)
+                    bad_pixels = (np.asarray(dq).astype(np.uint64) & np.uint64(3)) != 0
                     bad_pixels = bad_pixels[np.newaxis, :, :]
                     bad_pixels = np.broadcast_to(bad_pixels, data.shape)
                     fancyprint(f'  bad_pixels.shape={bad_pixels.shape}')
                     dq_for_mask = None
 
                 if dq_for_mask is not None:
-                    bad_pixels = (dq_for_mask > 0).astype(bool)
+                    # Mirror Stage 3 box extraction, which only masks DO_NOT_USE (1) and
+                    # SATURATED (2). Masking every flag would also NaN pixels that BadPixStep
+                    # already corrected or flagged as HIGH_VARIANCE, biasing the BadPixStep
+                    # sweeps towards settings that flag more pixels.
+                    bad_pixels = (np.asarray(dq_for_mask).astype(np.uint64) & np.uint64(3)) != 0
                     fancyprint(f'  bad_pixels.shape={bad_pixels.shape}')
 
             # Apply mask
@@ -230,31 +240,18 @@ def do_box_extraction_nanaware(cube, ypos, width, extract_start=0, extract_end=N
             if xx >= len(ypos):
                 xx = len(ypos) - 1
 
-            up_whole = np.floor(edge_up[xx]).astype(int)
-            low_whole = np.ceil(edge_low[xx]).astype(int)
+            # Fractional overlap of each detector row with [edge_low, edge_up], so partial
+            # pixels are weighted correctly at each edge independently.
+            rows = np.arange(max(int(np.floor(edge_low[xx])), 0),
+                             min(int(np.ceil(edge_up[xx])), dimy))
+            weights = np.clip(np.minimum(rows + 1, edge_up[xx]) - np.maximum(rows, edge_low[xx]),
+                              0, 1)
+            vals = cube[i, rows, x]
+            good = np.isfinite(vals) & (weights > 0)
 
             #  total flux and total valid pixel area
-            box = cube[i, low_whole:up_whole, x]
-
-            total_flux = np.nansum(box)
-            total_area = np.sum(np.isfinite(box))  #   valid whole pixels
-
-            # add partial pixels
-            if edge_up[xx] < (dimy-1) and edge_low[xx] > 0:
-                up_part = edge_up[xx] % 1
-                low_part = 1 - edge_low[xx] % 1
-
-                up_val = cube[i, up_whole, x]
-                low_val = cube[i, low_whole-1, x]
-
-                # add partial pixel flux if valid
-                if np.isfinite(up_val):
-                    total_flux += up_part * up_val
-                    total_area += up_part
-
-                if np.isfinite(low_val):
-                    total_flux += low_part * low_val
-                    total_area += low_part
+            total_flux = np.sum(weights[good] * vals[good])
+            total_area = np.sum(weights[good])
 
             # normalize by total valid pixel area
             if total_area > 0:
@@ -335,10 +332,9 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
             deepstack = deepstack[group]
 
         if instrument == 'NIRISS':
-            from jwst.pipeline import calwebb_spec2
             subarray = utils.get_soss_subarray(datafile)
-            step = calwebb_spec2.extract_1d_step.Extract1dStep()
-            tracetable = step.get_reference_file(datafile, 'spectrace')
+            # Use the same tracetable source as the Stage 1-3 steps.
+            tracetable = utils.get_soss_tracetable(subarray, _soss_ref_dir())
             cens = utils.get_centroids_soss(deepstack, tracetable, subarray, save_results=False)
             centroids['xpos'] = cens[0][0]
             centroids['ypos o1'] = cens[0][1]
@@ -475,7 +471,7 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
         fancyprint(f'  O1 flux.shape={flux_o1.shape}, sum={np.nansum(flux_o1):.6e}, mean={np.nanmean(flux_o1):.6e}')
         fancyprint(f'  O2 flux.shape={flux_o2.shape}, sum={np.nansum(flux_o2):.6e}, mean={np.nanmean(flux_o2):.6e}')
 
-        wave_o1, wave_o2 = get_wave_soss(datafile)
+        wave_o1, wave_o2 = get_wave_soss(datafile, _soss_ref_dir())
 
         # Diagnostic plots
         if plot_diagnostic:
