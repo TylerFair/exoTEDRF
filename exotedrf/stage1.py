@@ -118,6 +118,7 @@ class DQInitStep:
                 fancyprint('File {} already exists.'.format(expected_file))
                 fancyprint('Skipping Data Quality Initialization Step.')
                 res = expected_file
+                do_plot, show_plot = False, False
             # If no output files are detected, run the step.
             else:
                 step = calwebb_detector1.dq_init_step.DQInitStep()
@@ -245,6 +246,7 @@ class INLCorrStep:
                 fancyprint('File {} already exists.'.format(expected_file))
                 fancyprint('Skipping INL Correction Step.')
                 res = expected_file
+                do_plot, show_plot = False, False
             # If no output files are detected, run the step.
             else:
                 # Apply the INL correction.
