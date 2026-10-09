@@ -140,9 +140,6 @@ class Extract1DStep:
             fancyprint('ATOCA extraction selected but observation does not use NIRISS/SOSS. '
                        'Switching to box extraction.', msg_type='WARNING')
             self.extract_method = 'box'
-        if extract_method in ['doublegauss', 'decontam']:
-            raise ValueError('{} extraction is not supported in this branch.'
-                             .format(extract_method))
         if self.instrument == 'NIRISS' and extract_method == 'optimal':
             fancyprint('Optimal extraction not available for NIRISS/SOSS. '
                        'Switching to box extraction.', msg_type='WARNING')
@@ -151,7 +148,7 @@ class Extract1DStep:
     def run(self, extract_width=40, extract_width_soss2=None, soss_specprofile=None, centroids=None,
             save_results=True, force_redo=False, do_plot=False, show_plot=False, deepframe=None,
             use_pastasoss=False, opt_max_iter=25, opt_var_thresh=25, allow_miri_slope=False,
-            clip_thresh=10, saturation_rescue=False, mask_do_not_use_pixels=True):
+            clip_thresh=10):
         """Method to run the step.
 
         Parameters
@@ -186,11 +183,6 @@ class Extract1DStep:
             If True, allow the MIRI centroids to be sloped.
         clip_thresh : int
             Threshold for sigma clipping.
-        saturation_rescue : bool
-            If True for NIRISS/SOSS box extraction, keep post-RampFit pixels whose ramps were only
-            partially saturated so RampFit's pre-saturation slope estimate can be extracted.
-        mask_do_not_use_pixels : bool
-            If True, NaN DO_NOT_USE pixels before box extraction in addition to saturation handling.
 
         Returns
         -------
@@ -251,33 +243,21 @@ class Extract1DStep:
                 if isinstance(centroids, str):
                     centroids = pd.read_csv(centroids, comment='#')
 
-                mask_saturated_pixels = True
-                if self.instrument == 'NIRISS' and saturation_rescue is True:
-                    fancyprint('NIRISS saturation rescue enabled; keeping post-RampFit pixels '
-                               'with SATURATED DQ flags for box extraction.')
-                    mask_saturated_pixels = False
-
                 if self.instrument == 'NIRISS':
                     results = box_extract_soss(self.datafiles, centroids, extract_width,
                                                soss_width_o2=extract_width_soss2, do_plot=do_plot,
                                                show_plot=show_plot, save_results=save_results,
-                                               output_dir=self.output_dir, dq_report=True,
-                                               mask_saturated_pixels=mask_saturated_pixels,
-                                               mask_do_not_use_pixels=mask_do_not_use_pixels)
+                                               output_dir=self.output_dir, dq_report=True)
                 elif self.instrument == 'NIRSPEC':
                     results = box_extract_nirspec(self.datafiles, centroids, extract_width,
                                                   do_plot=do_plot, show_plot=show_plot,
                                                   save_results=save_results,
-                                                  output_dir=self.output_dir, dq_report=True,
-                                                  mask_saturated_pixels=mask_saturated_pixels,
-                                                  mask_do_not_use_pixels=mask_do_not_use_pixels)
+                                                  output_dir=self.output_dir, dq_report=True)
                 else:
                     results = box_extract_miri(self.datafiles, centroids, extract_width,
                                                do_plot=do_plot, show_plot=show_plot,
                                                save_results=save_results,
-                                               output_dir=self.output_dir, dq_report=True,
-                                               mask_saturated_pixels=mask_saturated_pixels,
-                                               mask_do_not_use_pixels=mask_do_not_use_pixels)
+                                               output_dir=self.output_dir, dq_report=True)
                 if extract_width == 'optimize':
                     # Get optimized width.
                     extract_width = int(results[-1])
@@ -564,12 +544,11 @@ def _mask_dq_pixels(data, err, dq, source_label, mask_saturated_pixels=True,
     return data, err, count
 
 
-def _load_box_extraction_cubes(datafiles, mask_saturated_pixels=True,
-                               mask_do_not_use_pixels=True):
-    """Load science/error/DQ cubes and NaN selected DQ pixels before box extraction."""
+def _load_box_extraction_cubes(datafiles):
+    """Load science/error/DQ cubes for box extraction.
+    """
 
     datafiles = np.atleast_1d(datafiles)
-    total_saturated = 0
     for i, file in enumerate(datafiles):
         if isinstance(file, str):
             data = fits.getdata(file)
@@ -578,7 +557,6 @@ def _load_box_extraction_cubes(datafiles, mask_saturated_pixels=True,
                 dq = fits.getdata(file, 3)
             except (IndexError, KeyError, OSError):
                 dq = None
-            source_label = os.path.basename(file)
         else:
             with utils.open_filetype(file) as datamodel:
                 data = datamodel.data
@@ -586,13 +564,7 @@ def _load_box_extraction_cubes(datafiles, mask_saturated_pixels=True,
                 dq = getattr(datamodel, 'dq', None)
                 if dq is None:
                     dq = getattr(datamodel, 'groupdq', None)
-            source_label = 'datamodel segment {}'.format(i)
 
-        data, err, count = _mask_dq_pixels(
-            data, err, dq, source_label, mask_saturated_pixels=mask_saturated_pixels,
-            mask_do_not_use_pixels=mask_do_not_use_pixels
-        )
-        total_saturated += count
         if i == 0:
             cube = data
             ecube = err
@@ -605,16 +577,11 @@ def _load_box_extraction_cubes(datafiles, mask_saturated_pixels=True,
             else:
                 dqcube = None
 
-    if total_saturated > 0:
-        fancyprint('Box extraction will ignore {} total DQ pixels.'
-                   .format(total_saturated))
-
     return cube, ecube, dqcube
 
 
 def box_extract_miri(datafiles, centroids, extract_width, do_plot=False, show_plot=False,
-                     save_results=True, output_dir='./', dq_report=False,
-                     mask_saturated_pixels=True, mask_do_not_use_pixels=True):
+                     save_results=True, output_dir='./', dq_report=False):
     """Perform a simple box aperture extraction on MIRI.
 
     Parameters
@@ -652,9 +619,7 @@ def box_extract_miri(datafiles, centroids, extract_width, do_plot=False, show_pl
     """
 
     datafiles = np.atleast_1d(datafiles)
-    cube, ecube, dqcube = _load_box_extraction_cubes(datafiles,
-                                                     mask_saturated_pixels=mask_saturated_pixels,
-                                                     mask_do_not_use_pixels=mask_do_not_use_pixels)
+    cube, ecube, dqcube = _load_box_extraction_cubes(datafiles)
 
     # Get centroid positions.
     x1, y1 = centroids['xpos'].values, centroids['ypos'].values
@@ -702,8 +667,7 @@ def box_extract_miri(datafiles, centroids, extract_width, do_plot=False, show_pl
 
 
 def box_extract_nirspec(datafiles, centroids, extract_width, do_plot=False, show_plot=False,
-                        save_results=True, output_dir='./', dq_report=False,
-                        mask_saturated_pixels=True, mask_do_not_use_pixels=True):
+                        save_results=True, output_dir='./', dq_report=False):
     """Perform a simple box aperture extraction on NIRSpec.
 
     Parameters
@@ -744,9 +708,7 @@ def box_extract_nirspec(datafiles, centroids, extract_width, do_plot=False, show
     det = utils.get_nrs_detector_name(datafiles[0])
     subarray = utils.get_soss_subarray(datafiles[0])
     grating = utils.get_nrs_grating(datafiles[0])
-    cube, ecube, dqcube = _load_box_extraction_cubes(datafiles,
-                                                     mask_saturated_pixels=mask_saturated_pixels,
-                                                     mask_do_not_use_pixels=mask_do_not_use_pixels)
+    cube, ecube, dqcube = _load_box_extraction_cubes(datafiles)
 
     # Get centroid positions.
     x1, y1 = centroids['xpos'].values, centroids['ypos'].values
@@ -794,8 +756,7 @@ def box_extract_nirspec(datafiles, centroids, extract_width, do_plot=False, show
 
 
 def box_extract_soss(datafiles, centroids, soss_width, soss_width_o2=None, do_plot=False,
-                     show_plot=False, save_results=True, output_dir='./', dq_report=False,
-                     mask_saturated_pixels=True, mask_do_not_use_pixels=True):
+                     show_plot=False, save_results=True, output_dir='./', dq_report=False):
     """Perform a simple box aperture extraction on SOSS orders 1 and 2.
 
     Parameters
@@ -845,9 +806,7 @@ def box_extract_soss(datafiles, centroids, soss_width, soss_width_o2=None, do_pl
     """
 
     datafiles = np.atleast_1d(datafiles)
-    cube, ecube, dqcube = _load_box_extraction_cubes(datafiles,
-                                                     mask_saturated_pixels=mask_saturated_pixels,
-                                                     mask_do_not_use_pixels=mask_do_not_use_pixels)
+    cube, ecube, dqcube = _load_box_extraction_cubes(datafiles)
 
     # Get centroid positions.
     x1 = centroids['xpos'].values
@@ -2716,8 +2675,7 @@ def run_stage3(results, save_results=True, root_dir='./', force_redo=False, extr
                soss_specprofile=None, centroids=None, extract_width=40, extract_width_soss2=None,
                st_teff=None, st_logg=None, st_met=None, planet_letter='b', output_tag='',
                do_plot=False, show_plot=False, opt_max_iter=25, opt_var_thresh=25, deepframe=None,
-               saturation_rescue=False, mask_do_not_use_pixels=True,
-               pipeline_outputs_directory='pipeline_outputs_directory', **kwargs):
+               **kwargs):
     """Run the exoTEDRF Stage 3 pipeline: 1D spectral extraction, using a combination of the
     official STScI DMS and custom steps.
 
@@ -2765,11 +2723,6 @@ def run_stage3(results, save_results=True, root_dir='./', force_redo=False, extr
         Variance threshold for a pixel to be flagged as an outlier during optimal exraction.
     deepframe : str, None
         Path to file containing a median stack of the observation.
-    saturation_rescue : bool
-        If True for NIRISS/SOSS box extraction, keep post-RampFit pixels whose ramps were only
-        partially saturated so RampFit's pre-saturation slope estimate can be extracted.
-    mask_do_not_use_pixels : bool
-        If True, NaN DO_NOT_USE pixels before box extraction in addition to saturation handling.
 
     Returns
     -------
@@ -2785,13 +2738,9 @@ def run_stage3(results, save_results=True, root_dir='./', force_redo=False, extr
     if output_tag != '':
         output_tag = '_' + output_tag
     # Create output directories and define output paths.
-    if os.path.isabs(pipeline_outputs_directory) or pipeline_outputs_directory.startswith('~'):
-        base_dir = os.path.expanduser(pipeline_outputs_directory) + output_tag
-    else:
-        base_dir = os.path.join(root_dir, pipeline_outputs_directory + output_tag)
-    utils.verify_path(base_dir)
-    utils.verify_path(os.path.join(base_dir, 'Stage3'))
-    outdir = os.path.join(base_dir, 'Stage3/')
+    utils.verify_path(root_dir + 'pipeline_outputs_directory' + output_tag)
+    utils.verify_path(root_dir + 'pipeline_outputs_directory' + output_tag + '/Stage3')
+    outdir = root_dir + 'pipeline_outputs_directory' + output_tag + '/Stage3/'
 
     # ===== SpecProfile Construction Step =====
     # Custom DMS step
@@ -2816,7 +2765,6 @@ def run_stage3(results, save_results=True, root_dir='./', force_redo=False, extr
                        soss_specprofile=soss_specprofile, centroids=centroids,
                        save_results=save_results, force_redo=force_redo, do_plot=do_plot,
                        show_plot=show_plot, deepframe=deepframe, opt_max_iter=opt_max_iter,
-                       opt_var_thresh=opt_var_thresh, saturation_rescue=saturation_rescue,
-                       mask_do_not_use_pixels=mask_do_not_use_pixels, **step_kwargs)
+                       opt_var_thresh=opt_var_thresh, **step_kwargs)
 
     return spectra
