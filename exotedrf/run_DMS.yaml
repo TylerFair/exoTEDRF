@@ -2,6 +2,7 @@
 #
 # This is the configuration file for run_DMS.py.
 #
+#
 # ===== Key Parameters =====
 # Path to CRDS cache.
 crds_cache_path : './crds_cache/'
@@ -16,6 +17,7 @@ input_filetag : 'uncal'
 observing_mode : 'NIRISS/SOSS'
 # Type of filter or detector used. For SOSS, either 'CLEAR' or 'F277W'. For NIRSpec, either 'NRS1' or 'NRS2'.
 filter_detector : 'CLEAR'
+
 
 # ===== Stage 1 Input Files & Parameters =====
 # List of stage 1 steps to run or skip.
@@ -76,6 +78,7 @@ time_jump_threshold : 10
 # DMS Stage 1 kwargs. Format should be: {'step_name': {'kwd': value}}.
 stage1_kwargs : {}
 
+
 # ===== Stage 2 Input Files & Parameters =====
 # List of stage 2 steps to run or skip.
 AssignWCSStep : 'run'
@@ -103,10 +106,11 @@ generate_lc : True
 # DMS Stage 2 kwargs. Format should be: {'step_name': {'kwd': value}}.
 stage2_kwargs : {}
 
+
 # ===== Stage 3 Input Files & Parameters =====
 # Extraction method. For SOSS, options are 'box' or 'atoca'. For all other instruments options are 'box' or 'optimal'.
 extract_method : 'box'
-# Full width to extract around the trace center. Passing None for optimal will extract the whole frame. Passing
+# Full width to extract around the trace centre. Passing None for optimal will extract the whole frame. Passing
 # 'optimize' will find and use the aperture width that minimizes the white light curve scatter for box.
 extract_width : 30
 # (SOSS only) Box width to use for order 2. Passing None will use the same aperture width as for order 1 (optional).
@@ -129,6 +133,7 @@ st_met : None
 planet_letter : 'b'
 # DMS Stage 3 kwargs. Format should be: {'step_name': {'kwd': value}}.
 stage3_kwargs : {}
+
 
 # ===== Other General Parameters =====
 # Name tag for output file directory.

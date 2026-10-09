@@ -8,20 +8,21 @@ Created on Fri Aug 15 00:00 2025
 Script to run the exoTEDRF pipeline optimizer.
 """
 
-import os       
-import sys    
-import glob    
-import time    
-import argparse 
+import argparse
 import ast
+import glob
+import os
 import re
-import yaml 
-from exotedrf import utils   
+import sys
+import time
+import yaml
+
+from exotedrf import utils
 
 early = argparse.ArgumentParser(add_help=False)
 early.add_argument(
     "--config", "-c",
-    default="run_optimize.yaml",   
+    default="run_optimize.yaml",
     help="Path to your DMS config YAML"
 )
 args, remaining = early.parse_known_args()
@@ -85,11 +86,6 @@ obs_early = (cfg_early.get('observing_mode') or '').lower()
 # Detector filter in lowercase (e.g., 'clear', 'nrs1', 'nrs2')
 filter_early = (cfg_early.get('filter_detector') or '').lower()
 # Wavelength range limits for analysis and plotting (if provided in config)
-
-### TRF TODO: Figure out how to (a) get wavelength solutions for nirspec
-### and miri at a given early Stage so the below can be used, else
-### (b) Use the default ranges below for plotting and summing
-
 wave_range_early      = cfg_early.get('wave_range', None)
 wave_range_plot_early = cfg_early.get('wave_range_plot', None)
 # Weighting factors for cost function or metrics,
@@ -268,7 +264,7 @@ def plot_cost(name_str, table_height=0.4):
 
     #normalize cost and highlight best 
     sweep_boundaries = [0] + sweep_lines + [len(df)]
-    colors = ['gray'] * len(df)  # default color
+    colors = ['gray'] * len(df)  # default colour
     normalized_costs = np.zeros(len(df))
 
     for i in range(len(sweep_boundaries) - 1):
@@ -497,7 +493,7 @@ def cost_function(st3, baseline_ints=None, wave_range=None, w1=0.0, w2=1.0, tol=
     white      = np.nansum(flux, axis=1)
     white      = white[~np.isnan(white)]
     norm_white = white / np.median(white)
-    # 2nd finite difference (neighbor avg - center)
+    # 2nd finite difference (neighbour avg - centre)
     d2_white   = 0.5*(norm_white[:-2] + norm_white[2:]) - norm_white[1:-1]
     ptp2_white = np.nanmedian(np.abs(d2_white))
 
@@ -1328,7 +1324,7 @@ def run_stage3_for_width(stage2_inputs, cfg, centroids, deepframe, extract_width
         deepframe=deepframe,
         saturation_rescue=cfg.get('saturation_rescue', False),
         mask_do_not_use_pixels=cfg.get('mask_do_not_use_pixels', True),
-        pipeline_outputs_directory=base_outdir,
+        root_dir=root_dir,
         **cfg.get('stage3_kwargs', {})
     )
 
@@ -1711,7 +1707,7 @@ def main():
             miri_trace_width=cfg.get('miri_trace_width'),
             miri_background_width=cfg.get('miri_background_width'),
             miri_background_method=cfg.get('miri_background_method'),
-            pipeline_outputs_directory=base_outdir,
+            root_dir=root_dir,
             **cfg.get('stage2_kwargs', {})
         )
         if deepframe is None:
@@ -1987,7 +1983,7 @@ def main():
                         f277w=run_cfg.get('f277w'),
                         inl_amplitude_file=run_cfg.get('inl_amplitude_file'),
                         inl_periods=run_cfg.get('inl_periods'),
-                        pipeline_outputs_directory=base_outdir,
+                        root_dir=root_dir,
                         **s1_kwargs
                     )
 
@@ -2033,7 +2029,7 @@ def main():
                         centroids=run_cfg.get('centroids'),
                         hot_pixel_map=run_cfg.get('hot_pixel_map'),
                         miri_drop_groups=run_cfg.get('miri_drop_groups'),
-                        pipeline_outputs_directory=base_outdir,
+                        root_dir=root_dir,
                         saturation_threshold=run_cfg.get('saturation_threshold', 80),
                         f277w=run_cfg.get('f277w'),
                         inl_amplitude_file=run_cfg.get('inl_amplitude_file'),
@@ -2089,7 +2085,7 @@ def main():
                         miri_trace_width=run_cfg.get('miri_trace_width'),
                         miri_background_width=run_cfg.get('miri_background_width'),
                         miri_background_method=run_cfg.get('miri_background_method'),
-                        pipeline_outputs_directory=base_outdir,
+                        root_dir=root_dir,
                         **s2_kwargs
                     )
 
@@ -2134,7 +2130,7 @@ def main():
                         centroids=run_cfg.get('centroids'),
                         hot_pixel_map=run_cfg.get('hot_pixel_map'),
                         miri_drop_groups=run_cfg.get('miri_drop_groups'),
-                        pipeline_outputs_directory=base_outdir,
+                        root_dir=root_dir,
                         saturation_threshold=run_cfg.get('saturation_threshold', 80),
                         f277w=run_cfg.get('f277w'),
                         inl_amplitude_file=run_cfg.get('inl_amplitude_file'),
@@ -2182,7 +2178,7 @@ def main():
                         miri_trace_width=run_cfg.get('miri_trace_width'),
                         miri_background_width=run_cfg.get('miri_background_width'),
                         miri_background_method=run_cfg.get('miri_background_method'),
-                        pipeline_outputs_directory=base_outdir,
+                        root_dir=root_dir,
                         **stage2_kwargs_with_winners(run_cfg)
                     )
 
@@ -2317,7 +2313,7 @@ def main():
         centroids=final_cfg.get('centroids'),
         hot_pixel_map=final_cfg.get('hot_pixel_map'),
         miri_drop_groups=final_cfg.get('miri_drop_groups'),
-        pipeline_outputs_directory=base_outdir,
+        root_dir=root_dir,
         saturation_threshold=final_cfg.get('saturation_threshold', 80),
         f277w=final_cfg.get('f277w'),
         inl_amplitude_file=final_cfg.get('inl_amplitude_file'),
@@ -2368,7 +2364,7 @@ def main():
         miri_trace_width=final_cfg.get('miri_trace_width'),
         miri_background_width=final_cfg.get('miri_background_width'),
         miri_background_method=final_cfg.get('miri_background_method'),
-        pipeline_outputs_directory=base_outdir,
+        root_dir=root_dir,
         **stage2_kwargs_with_winners(final_cfg)
     )
 
@@ -2430,7 +2426,7 @@ def main():
                 deepframe=this_deepframe,
                 saturation_rescue=final_cfg.get('saturation_rescue', False),
                 mask_do_not_use_pixels=final_cfg.get('mask_do_not_use_pixels', True),
-                pipeline_outputs_directory=base_outdir,
+                root_dir=root_dir,
                 **final_cfg.get('stage3_kwargs', {})
             )
 
@@ -2497,7 +2493,7 @@ def main():
             deepframe=this_deepframe,
             saturation_rescue=final_cfg.get('saturation_rescue', False),
             mask_do_not_use_pixels=final_cfg.get('mask_do_not_use_pixels', True),
-            pipeline_outputs_directory=base_outdir,
+            root_dir=root_dir,
             **final_cfg.get('stage3_kwargs', {})
         )
     else:
@@ -2525,7 +2521,7 @@ def main():
             deepframe=this_deepframe,
             saturation_rescue=final_cfg.get('saturation_rescue', False),
             mask_do_not_use_pixels=final_cfg.get('mask_do_not_use_pixels', True),
-            pipeline_outputs_directory=base_outdir,
+            root_dir=root_dir,
             **final_cfg.get('stage3_kwargs', {})
         )
 

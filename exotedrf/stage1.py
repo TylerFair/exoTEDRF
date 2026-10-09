@@ -1446,7 +1446,7 @@ class RampFitStep:
                                 maximum_cores=maximum_cores, **kwargs)[1]
                 # From jwst v1.9.0-1.11.0 ramp fitting algorithm was changed to make all pixels
                 # with DO_NOT_USE DQ flags be NaN after ramp fitting. These pixels are marked,
-                # ignored and interpolated anyways, so this does not change any actual
+                # ignored and interpolated anyway, so this does not change any actual
                 # functionality, but cosmetcically this annoys me, as now plots look terrible.
                 # Just griddata interpolate all NaNs so things look better. Note this does not
                 # supercede any interpolation done later in Stage 2.
