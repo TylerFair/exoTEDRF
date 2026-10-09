@@ -1,45 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Helper functions for the optimize.py script with handling of 
-DQ flags and extraction.
+@author: PSD, modified by TRF
+
+Helper functions for the optimize.py script with handling of DQ flags and extraction.
 """
 
-import numpy as np
-import pandas as pd
 from astropy.io import fits
-from tqdm import tqdm
+import matplotlib.pyplot as plt
+import numpy as np
 import os
+import pandas as pd
+from tqdm import tqdm
 
+from exotedrf.stage3 import get_wave_soss, trace_spectrum, _parse_extraction_width
 from exotedrf import utils
 from exotedrf.utils import fancyprint
-from exotedrf.stage3 import get_wave_soss, trace_spectrum, do_two_gaussian_extraction
-import matplotlib.pyplot as plt
-
-
-def _soss_ref_dir():
-    """Directory used by the Stage 1-3 steps for SOSS tracetable/wavemap reference files."""
-
-    return os.environ['CRDS_PATH'] + '/references/jwst/niriss/'
-
-
-def _parse_width(width):
-    """Normalize symmetric and asymmetric widths for optimizer-side extraction."""
-
-    if isinstance(width, dict):
-        if 'lower' not in width or 'upper' not in width:
-            raise ValueError('Width dictionaries must contain "lower" and "upper" keys.')
-        return float(width['lower']), float(width['upper'])
-    if np.isscalar(width):
-        half_width = float(width) / 2
-        return half_width, half_width
-
-    try:
-        lower_width, upper_width = width
-    except (TypeError, ValueError):
-        raise ValueError('width must be a scalar, a two-element sequence, or a dictionary with '
-                         '"lower"/"upper" keys.')
-    return float(lower_width), float(upper_width)
 
 
 def last_scoreable_group(dq):
@@ -69,6 +45,7 @@ def last_scoreable_group(dq):
         Group index to mask and score. Falls back to -1 if every group is
         fully flagged.
     """
+    
     ngroup = dq.shape[1]
     for group in range(ngroup - 1, -1, -1):
         if not np.all(dq[:, group] > 0):
@@ -82,8 +59,7 @@ def last_scoreable_group(dq):
 
 
 def apply_dq_flags(datafiles):
-    """
-    Load data and apply DQ flags by NaN-ing out bad pixels.
+    """Load data and apply DQ flags by NaN-ing out bad pixels.
     Errors are NOT loaded/returned since they're not needed for optimization.
 
     Parameters
@@ -98,6 +74,7 @@ def apply_dq_flags(datafiles):
         For 4D input, the group whose DQ was used for the mask and which the
         caller must therefore score (see last_scoreable_group). -1 for 3D.
     """
+    
     datafiles = np.atleast_1d(datafiles)
     group = None
 
@@ -205,8 +182,7 @@ def apply_dq_flags(datafiles):
 
 
 def do_box_extraction_nanaware(cube, ypos, width, extract_start=0, extract_end=None, progress=True):
-    """
-    Box extraction with nansum. Modified from stage3.do_box_extraction.
+    """Box extraction with nansum. Modified from stage3.do_box_extraction.
     Note: Errors are NOT calculated since they're not needed for optimization.
 
     Parameters
@@ -221,6 +197,7 @@ def do_box_extraction_nanaware(cube, ypos, width, extract_start=0, extract_end=N
     Returns
     f :  (nint, nx) - Extracted flux
     """
+
     assert cube.ndim == 3, f"Expected 3D, got {cube.ndim}D shape {cube.shape}"
 
     nint, dimy, dimx = np.shape(cube)
@@ -230,7 +207,7 @@ def do_box_extraction_nanaware(cube, ypos, width, extract_start=0, extract_end=N
 
     f = np.zeros((nint, dimx))
 
-    lower_width, upper_width = _parse_width(width)
+    lower_width, upper_width = _parse_extraction_width(width)
     edge_up = np.min([ypos + upper_width, np.ones_like(ypos) * dimy], axis=0)
     edge_low = np.max([ypos - lower_width, np.zeros_like(ypos)], axis=0)
 
@@ -265,8 +242,7 @@ def do_box_extraction_nanaware(cube, ypos, width, extract_start=0, extract_end=N
 def extract_at_step(datafile, instrument, extract_width, centroids, baseline_ints, output_dir,
                     plot_diagnostic=False, extract_method='box', extract_width_soss2=None,
                     extract_step_kwargs=None):
-    """
-    Extract spectra from a datafile at any pipeline step.
+    """Extract spectra from a datafile at any pipeline step.
     Note: Errors are NOT returned since they're not needed for optimization.
 
     Parameters
@@ -297,6 +273,7 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
     centroids
         The centroids used (for caching)
     """
+
     fancyprint(f'=== Extracting {instrument} at current step ===')
     fancyprint(f'  datafile: {datafile if isinstance(datafile, str) else "datamodel"}')
     fancyprint(f'  extract_width: {extract_width}')
@@ -334,7 +311,8 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
         if instrument == 'NIRISS':
             subarray = utils.get_soss_subarray(datafile)
             # Use the same tracetable source as the Stage 1-3 steps.
-            tracetable = utils.get_soss_tracetable(subarray, _soss_ref_dir())
+            outdir = os.environ['CRDS_PATH'] + '/references/jwst/niriss/'
+            tracetable = utils.get_soss_tracetable(subarray, outdir)
             cens = utils.get_centroids_soss(deepstack, tracetable, subarray, save_results=False)
             centroids['xpos'] = cens[0][0]
             centroids['ypos o1'] = cens[0][1]
@@ -388,7 +366,7 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
             if len(nan_x) > 0:
                 plt.plot(nan_x, nan_y, 'r.', markersize=0.5, alpha=0.5, label=f'Flagged pixels ({len(nan_x)})')
 
-            lower_width, upper_width = _parse_width(extract_width)
+            lower_width, upper_width = _parse_extraction_width(extract_width)
             plt.plot(x1, y1, 'lime', linewidth=1.5, label='Trace center')
             plt.plot(x1, y1 + upper_width, 'y--', linewidth=1, label=f'Aperture (width={extract_width})')
             plt.plot(x1, y1 - lower_width, 'y--', linewidth=1)
@@ -441,37 +419,14 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
         ii = np.where(np.isfinite(y2))[0]
         y2_finite = y2[ii]
 
-        if extract_method == 'doublegauss':
-            separation_guess = extract_step_kwargs.get('double_gaussian_separation_guess', 4.0)
-            separation_guess_o2 = extract_step_kwargs.get(
-                'double_gaussian_separation_guess_soss2', separation_guess
-            )
-            fit_background = extract_step_kwargs.get('double_gaussian_fit_background', True)
-            main_component = int(extract_step_kwargs.get('double_gaussian_main_component', 1))
-            err = np.ones_like(cube, dtype=float)
-
-            flux1_o1, _, flux2_o1, _, _ = do_two_gaussian_extraction(
-                cube, err, y1, width=w1, progress=False, separation_guess=separation_guess,
-                fit_background=fit_background
-            )
-            flux1_o2, _, flux2_o2, _, _ = do_two_gaussian_extraction(
-                cube, err, y2_finite, width=w2, extract_end=len(y2_finite), progress=False,
-                separation_guess=separation_guess_o2, fit_background=fit_background
-            )
-
-            if main_component == 1:
-                flux_o1, flux_o2 = flux1_o1, flux1_o2
-            else:
-                flux_o1, flux_o2 = flux2_o1, flux2_o2
-        else:
-            flux_o1 = do_box_extraction_nanaware(cube, y1, width=w1)
-            flux_o2 = do_box_extraction_nanaware(cube, y2_finite, width=w2,
-                                                 extract_end=len(y2_finite))
+        flux_o1 = do_box_extraction_nanaware(cube, y1, width=w1)
+        flux_o2 = do_box_extraction_nanaware(cube, y2_finite, width=w2, extract_end=len(y2_finite))
 
         fancyprint(f'  O1 flux.shape={flux_o1.shape}, sum={np.nansum(flux_o1):.6e}, mean={np.nanmean(flux_o1):.6e}')
         fancyprint(f'  O2 flux.shape={flux_o2.shape}, sum={np.nansum(flux_o2):.6e}, mean={np.nanmean(flux_o2):.6e}')
 
-        wave_o1, wave_o2 = get_wave_soss(datafile, _soss_ref_dir())
+        outdir = os.environ['CRDS_PATH'] + '/references/jwst/niriss/'
+        wave_o1, wave_o2 = get_wave_soss(datafile, outdir)
 
         # Diagnostic plots
         if plot_diagnostic:
@@ -489,8 +444,8 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
             if len(nan_x) > 0:
                 plt.plot(nan_x, nan_y, 'r.', markersize=0.5, alpha=0.5, label=f'Flagged pixels ({len(nan_x)})')
 
-            lower1, upper1 = _parse_width(w1)
-            lower2, upper2 = _parse_width(w2)
+            lower1, upper1 = _parse_extraction_width(w1)
+            lower2, upper2 = _parse_extraction_width(w2)
             plt.plot(x1, y1, 'lime', linewidth=1.5, label='Order 1 center')
             plt.plot(x1, y1 + upper1, 'y--', linewidth=1, label=f'O1 aperture (width={w1})')
             plt.plot(x1, y1 - lower1, 'y--', linewidth=1)
@@ -585,7 +540,7 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
 
             # Plot trace as function of Y position (for MIRI geometry)
             y_coords = np.arange(len(x1))
-            lower_width, upper_width = _parse_width(extract_width)
+            lower_width, upper_width = _parse_extraction_width(extract_width)
             plt.plot(y_coords, x1, 'lime', linewidth=1.5, label='Trace center')
             plt.plot(y_coords, x1 + upper_width, 'y--', linewidth=1, label=f'Aperture (width={extract_width})')
             plt.plot(y_coords, x1 - lower_width, 'y--', linewidth=1)

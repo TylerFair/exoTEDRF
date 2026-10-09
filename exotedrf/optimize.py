@@ -57,7 +57,7 @@ from exotedrf.utils import parse_config, unpack_input_dir, fancyprint
 from exotedrf.stage1 import run_stage1
 from exotedrf.stage2 import run_stage2
 from exotedrf.stage3 import run_stage3, do_box_extraction
-from exotedrf.optimize_helpers import extract_at_step
+from exotedrf.optimize_utils import extract_at_step
 
 
 root_dir = cfg_early.get('root_dir', './')
