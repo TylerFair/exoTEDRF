@@ -110,7 +110,6 @@ class DQInitStep:
             fancyprint('Setting "save_results=False" can be memory intensive.', msg_type='WARNING')
 
         results = []
-        sat_pix_plot = None
         all_files = glob.glob(self.output_dir + '*')
         for i, segment in enumerate(self.datafiles):
             # If an output file for this segment already exists, skip the step.
@@ -148,7 +147,6 @@ class DQInitStep:
                                                      saturation_threshold=saturation_threshold,
                                                      nrs_detector=self.detector,
                                                      flag_neighbours=flag_neighbours)
-                sat_pix_plot = sat_pix[-1, -1]
                 # Overwite the previous edition of the file.
                 res.save(expected_file)
 
@@ -162,10 +160,6 @@ class DQInitStep:
                         thisfile[0].header['FILENAME'] = self.fileroots[i] + self.tag
                         thisfile.writeto(expected_file, overwrite=True)
                     res = expected_file
-            if do_plot is True and expected_file in all_files and force_redo is False:
-                with utils.open_filetype(res) as thisfile:
-                    sat_pix_plot = utils.get_dq_flag_metrics(thisfile.groupdq[-1, -1],
-                                                             ['SATURATED'])
             results.append(res)
 
         # Do step plot if requested.
@@ -173,13 +167,14 @@ class DQInitStep:
             plot_file = self.output_dir + self.tag.replace('.fits', '.png')
             if self.instrument == 'NIRSPEC':
                 plot_file = plot_file.replace('.png', '_{}.png'.format(self.detector))
-            plotting.plot_saturated_pixels(sat_pix_plot, outfile=plot_file, show_plot=show_plot)
+            plotting.plot_saturated_pixels(sat_pix[-1, -1], outfile=plot_file, show_plot=show_plot)
 
         return results
 
 
 class INLCorrStep:
-    """Wrapper around custom integral non-linearity correction routine."""
+    """Wrapper around custom integral non-linearity correction routine.
+    """
 
     def __init__(self, input_data, output_dir):
         """Step initializer.
@@ -192,11 +187,15 @@ class INLCorrStep:
             Path to directory to which to save outputs.
         """
 
+        # Set up easy attributes.
         self.tag = 'inlcorrstep.fits'
         self.output_dir = output_dir
 
+        # Unpack input data files.
         self.datafiles = utils.sort_datamodels(input_data)
         self.fileroots = utils.get_filename_root(self.datafiles)
+
+        # Get instrument.
         self.instrument = utils.get_instrument_name(self.datafiles[0])
 
     def run(self, save_results=True, force_redo=False, amplitude_file=None, periods=None,
@@ -227,27 +226,33 @@ class INLCorrStep:
             Input data files processed through the step.
         """
 
+        # Only run for NIRISS observations.
         if self.instrument != 'NIRISS':
             fancyprint('INL Correction only necessary for NIRISS.')
             fancyprint('Skipping INL Correction Step.')
             return self.datafiles
 
+        # Warn user that datamodels will be returned if not saving results.
         if save_results is False:
             fancyprint('Setting "save_results=False" can be memory intensive.', msg_type='WARNING')
 
         results = []
         all_files = glob.glob(self.output_dir + '*')
         for i, segment in enumerate(self.datafiles):
+            # If an output file for this segment already exists, skip the step.
             expected_file = self.output_dir + self.fileroots[i] + self.tag
             if expected_file in all_files and force_redo is False:
                 fancyprint('File {} already exists.'.format(expected_file))
                 fancyprint('Skipping INL Correction Step.')
                 res = expected_file
+            # If no output files are detected, run the step.
             else:
+                # Apply the INL correction.
                 res = inlcorrstep(segment, amplitude_file=amplitude_file, periods=periods,
                                   output_dir=self.output_dir, save_results=save_results,
                                   fileroot=self.fileroots[i])
 
+                # Do step plot if requested.
                 if do_plot is True and i == 0:
                     plot_file = self.output_dir + self.tag.replace('.fits', '.png')
                     plotting.plot_inl_correction(segment, res, outfile=plot_file,
@@ -852,7 +857,6 @@ class OneOverFStep:
         processed_outliers = []
         first_time = True
         reused_cached_results = False
-        mle_results = []
         for i, segment in enumerate(self.datafiles):
             # If an output file for this segment already exists, skip the step.
             expected_file = self.output_dir + self.fileroots[i] + self.tag
@@ -895,10 +899,9 @@ class OneOverFStep:
                             # Download the reference file.
                             outdir = os.environ['CRDS_PATH'] + '/references/jwst/niriss/'
                             tracetable = utils.get_soss_tracetable(subarray, outdir)
-                            # Get centroids, falling back on earlier groups if the final group
-                            # is saturated.
-                            cens = _get_soss_centroids_with_group_fallback(deepstack, tracetable,
-                                                                           subarray)
+                            # Get centroids.
+                            cens = utils.get_centroids_soss(thisdeep, tracetable, subarray,
+                                                            save_results=False)
                             self.centroids['xpos'] = cens[0][0]
                             self.centroids['ypos o1'] = cens[0][1]
                             self.centroids['ypos o2'] = cens[1][1]
@@ -914,6 +917,9 @@ class OneOverFStep:
                             self.centroids['xpos'], self.centroids['ypos'] = cens[0], cens[1]
 
                     # Quantity #3: storage arrays for NIRISS solving method.
+                    if self.method == 'solve':
+                        mle_results = []
+
                     # Quantity #4: construct NIRISS contaminant mask.
                     # For NIRISS, mask order 0 contaminants if an F277W exposure is passed.
                     if self.instrument == 'NIRISS' and self.f277w is not None:
@@ -1103,26 +1109,6 @@ class OneOverFStep:
         fancyprint('Step OneOverFStep done.')
 
         return results
-
-
-def _get_soss_centroids_with_group_fallback(deepstack, tracetable, subarray):
-    """Locate SOSS centroids, trying earlier groups if the final group is saturated."""
-
-    if np.ndim(deepstack) == 3:
-        failures = []
-        for group in range(np.shape(deepstack)[0] - 1, -1, -1):
-            try:
-                fancyprint('Trying SOSS centroiding with group {} deepstack.'.format(group))
-                return utils.get_centroids_soss(deepstack[group], tracetable, subarray,
-                                                save_results=False)
-            except (TypeError, ValueError, RuntimeError) as err:
-                failures.append('group {}: {}'.format(group, err))
-
-        raise RuntimeError('Could not locate SOSS centroids in any group deepstack. Pass a '
-                           'known-good centroids CSV in the config. Failures: {}'
-                           .format('; '.join(failures)))
-
-    return utils.get_centroids_soss(deepstack, tracetable, subarray, save_results=False)
 
 
 class LinearityStep:
@@ -1458,18 +1444,6 @@ class RampFitStep:
                 step = calwebb_detector1.ramp_fit_step.RampFitStep()
                 res = step.call(segment, output_dir=self.output_dir, save_results=save_results,
                                 maximum_cores=maximum_cores, **kwargs)[1]
-                # RampFit does not necessarily carry later-group saturation into the rateints DQ.
-                # Preserve enough collapsed saturation state for Stage 3 to either mask any ramp
-                # that saturated, or rescue only ramps that first saturated in the final group.
-                sat_any, sat_early = _get_group_saturation_masks(segment)
-                if sat_any is not None:
-                    dq = res.dq.astype(np.uint32)
-                    dq = np.bitwise_or(dq, 2 * sat_any.astype(np.uint32))
-                    dq = np.bitwise_or(dq, sat_early.astype(np.uint32))
-                    res.dq = dq.astype(res.dq.dtype)
-                    fancyprint('Propagated {} any-group saturation flags to RampFit DQ; marked '
-                               '{} early-saturated ramps DO_NOT_USE.'
-                               .format(int(np.sum(sat_any)), int(np.sum(sat_early))))
                 # From jwst v1.9.0-1.11.0 ramp fitting algorithm was changed to make all pixels
                 # with DO_NOT_USE DQ flags be NaN after ramp fitting. These pixels are marked,
                 # ignored and interpolated anyways, so this does not change any actual
@@ -1503,24 +1477,6 @@ class RampFitStep:
         fancyprint('Step RampFitStep really done.')
 
         return results
-
-
-def _get_group_saturation_masks(datafile):
-    """Collapse RampModel GROUPDQ saturation flags to rateints-shaped masks."""
-
-    try:
-        if isinstance(datafile, str):
-            groupdq = fits.getdata(datafile, 'GROUPDQ')
-        else:
-            with utils.open_filetype(datafile) as currentfile:
-                groupdq = currentfile.groupdq
-        saturated = (groupdq.astype(np.uint32) & np.uint32(2)) != 0
-        sat_any = np.any(saturated, axis=1)
-        first_sat = np.argmax(saturated, axis=1)
-        sat_early = sat_any & (first_sat < 2)
-        return sat_any, sat_early
-    except (AttributeError, KeyError, IndexError, OSError):
-        return None, None
 
 
 class GainScaleStep:
@@ -1595,18 +1551,32 @@ class GainScaleStep:
 
 def eval_inl_fourier_counts(data, theta, periods):
     """Evaluate a Fourier series to calculate the INL correction for NIRISS data frames.
+    Based on the correction developed by Dholakia et al. (2026) PASP 138 094506.
 
-    Based on the correction developed by Dholakia+ 2026 and Desdoigts+ 2025.
+    Parameters
+    ----------
+    data : array-like(float)
+        Input data frame.
+    theta : array-like(float)
+        INL Fourier series coefficients corresponding to each period.
+    periods : array-like(float)
+        INL Fourier series periods to remove.
+
+    Returns
+    -------
+    corr : np.ndarray(float)
+        INL correction values.
     """
 
     corr = np.zeros_like(data)
 
-    # Nominally the 1024 ADU primary signal and its first two harmonics.
+    # Loop over the (generally three) periods to correct.
+    # Nominally the 1024 ADU primary signal and it's first two harmonics.
     for k, period in enumerate(periods):
         w = 2.0 * np.pi / period * data
-        c1 = theta[2 * k]
-        c2 = theta[2 * k + 1]
-        corr += c1 * np.sin(w) + c2 * np.cos(w)
+        c1 = theta[2 * k]  # sine coefficient
+        c2 = theta[2 * k + 1]  # cosine coefficient
+        corr += c1 * np.sin(w) + c2 * np.cos(w)  # Evaluate correction based on Dholakia+ 2026
 
     return corr
 
@@ -1717,13 +1687,12 @@ def flag_saturated_pixels(datafile, instrument, saturation_threshold=80, nrs_det
     else:
         saturation_adu = 56600
 
-    # Calculate saturation threshold in ADU.
-    saturation_percent = saturation_threshold
-    saturation_threshold = saturation_threshold / 100
+    # Calculate saturation threshold in adu.
+    saturation_threshold /= 100  # Convert from percentage
     saturation_adu *= saturation_threshold
 
     fancyprint('Identifying saturated pixels using a threshold of {} DN ({}% full well).'
-               .format(saturation_adu, saturation_percent))
+               .format(saturation_adu, saturation_threshold*100))
 
     # Locate saturated pixels.
     inds = datafile.data >= saturation_adu
@@ -1757,10 +1726,33 @@ def flag_saturated_pixels(datafile, instrument, saturation_threshold=80, nrs_det
 
 def inlcorrstep(datafile, amplitude_file=None, periods=None, save_results=True, output_dir='./',
                 fileroot=None):
-    """Correct the integral nonlinearity effect in NIRISS datasets."""
+    """Correct the Integral Nonlinearity effect identified by Dholakia+ 2026 and Desdoigts+ 2025 in
+    NIRISS datasets.
+
+    Parameters
+    ----------
+    datafile : str
+        Path to input uncalibrated datafile.
+    amplitude_file : str, None
+        Path to file containing Fourier series ampliudes for each period to correct. Should be a
+        numpy file.
+    periods : array-like(float), None
+        List of periods to correct.
+    output_dir : str, None
+        Directory to which to save results. Only necessary if saving results.
+    save_results : bool
+        If True, save results to disk.
+    fileroot : str, None
+        Root name for output file. Only necessary if saving results.
+
+    Returns
+    -------
+    result : CubeModel, RampModel, str
+        RampModel for the segment, corrected for the INL effect.
+    """
 
     fancyprint('Starting SOSS Integral Nonlinearity Correction step.')
-
+    # Load in data, accept both strings (open as fits) and datamodels.
     if isinstance(datafile, str):
         cube = fits.getdata(datafile, 1)
         filename = fits.getheader(datafile, 0)['FILENAME']
@@ -1770,34 +1762,46 @@ def inlcorrstep(datafile, amplitude_file=None, periods=None, save_results=True, 
             filename = thisfile.meta.filename
     fancyprint('Processing file {}.'.format(filename))
 
-    if output_dir is not None and output_dir[-1] != '/':
-        output_dir += '/'
+    # Output directory formatting.
+    if output_dir is not None:
+        if output_dir[-1] != '/':
+            output_dir += '/'
 
+    # If no periods are provided, use the default 1024 ADU value and its first two harmonics.
     if periods is None:
-        periods = [1024 / 3, 1024 / 2, 1024]
+        periods = [1024/3, 1024/2, 1024]
 
+    # If no amplitude file is passed, grab the Dholakia+ 2026 one from GitHub.
     if amplitude_file is None:
         amplitude_file = 'fourier_series_amplitudes.npy'
         download_ref_file(amplitude_file,
                           'https://raw.githubusercontent.com/shashankdholakia/niriss-cal-inl/main/',
                           './')
-
+    # Open the Fourier series amplitudes.
     theta = np.load(amplitude_file)
+    # There should be two coefficients for each period.
     assert len(theta) == 2 * len(periods)
 
+    # Calculate the per-pixel INL correction.
     fancyprint('Evaluating INL correction...')
     inl_correction = eval_inl_fourier_counts(cube, theta, periods)
 
+    # Apply the INL correction.
     fancyprint('Applying INL correction...')
     cube_corr = cube / (1 + inl_correction)
 
+    # Save results is requested
     if save_results is True:
         thisfile = fits.open(datafile)
         thisfile[1].data = cube_corr
+        # Save corrected data.
         result = output_dir + fileroot + 'inlcorrstep.fits'
         thisfile[0].header['FILENAME'] = fileroot + 'inlcorrstep.fits'
         thisfile.writeto(result, overwrite=True)
         fancyprint('File saved to: {}.'.format(result))
+
+    # If not saving results, need to work in datamodels to not break interoperability with stsci
+    # pipeline.
     else:
         currentfile = utils.open_filetype(datafile)
         result = copy.deepcopy(currentfile)
@@ -2993,8 +2997,7 @@ def run_stage1(results, mode, soss_background_model=None, baseline_ints=None,
                skip_steps=None, do_plot=False, show_plot=False, soss_inner_mask_width=40,
                soss_outer_mask_width=70, centroids=None, nirspec_mask_width=16, miri_drop_groups=12,
                miri_subtract_dark=True, saturation_threshold=None, flag_neighbours=1, f277w=None,
-               inl_amplitude_file=None, inl_periods=None,
-               pipeline_outputs_directory='pipeline_outputs_directory', **kwargs):
+               inl_amplitude_file=None, inl_periods=None, **kwargs):
     """Run the exoTEDRF Stage 1 pipeline: detector level processing, using a combination of
     official STScI DMS and custom steps. Documentation for the official DMS steps can be found here:
     https://jwst-pipeline.readthedocs.io/en/latest/jwst/pipeline/calwebb_detector1.html
@@ -3089,20 +3092,12 @@ def run_stage1(results, mode, soss_background_model=None, baseline_ints=None,
     if output_tag != '':
         output_tag = '_' + output_tag
     # Create output directories and define output paths.
-    # Handle absolute vs relative pipeline_outputs_directory paths.
-    import os
-    if os.path.isabs(pipeline_outputs_directory) or pipeline_outputs_directory.startswith('~'):
-        base_dir = os.path.expanduser(pipeline_outputs_directory) + output_tag
-    else:
-        base_dir = os.path.join(root_dir, pipeline_outputs_directory + output_tag)
-    utils.verify_path(base_dir)
-    outdir = os.path.join(base_dir, 'Stage1/')
+    utils.verify_path(root_dir + 'pipeline_outputs_directory' + output_tag)
+    outdir = root_dir + 'pipeline_outputs_directory' + output_tag + '/Stage1/'
     utils.verify_path(outdir)
 
     if skip_steps is None:
         skip_steps = []
-    if saturation_threshold is None:
-        saturation_threshold = 80
 
     # ===== Data Quality Initialization Step =====
     # Default/Custom DMS step.
@@ -3184,6 +3179,7 @@ def run_stage1(results, mode, soss_background_model=None, baseline_ints=None,
             step = DarkCurrentStep(results, output_dir=outdir)
             results = step.run(save_results=save_results, force_redo=force_redo, **step_kwargs)
 
+    # ===== 1/f and Background Correction Suite =====
     if mode.upper() != 'MIRI/LRS':
         if 'OneOverFStep' not in skip_steps:
             if mode == 'NIRISS/SOSS':

@@ -5,7 +5,10 @@
 # ===== Key Parameters =====
 # Path to CRDS cache.
 crds_cache_path : './crds_cache/'
-# Input data file directory.
+# Relative path to root directory where raw data is stored.
+# All outputs will be written to a new directory in root_dir called pipeline_outputs_directory.
+root_dir : './'
+# Input data file directory within root_dir.
 input_dir : 'DMS_uncal/'
 # Input file tag.
 input_filetag : 'uncal'

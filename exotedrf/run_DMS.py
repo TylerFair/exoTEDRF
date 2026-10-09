@@ -126,7 +126,9 @@ def run_dms(config, input_files):
                                     saturation_threshold=config['saturation_threshold'],
                                     f277w=config['f277w'],
                                     inl_amplitude_file=config['inl_amplitudes_file'],
-                                    inl_periods=config['inl_periods'], **config['stage1_kwargs'])
+                                    inl_periods=config['inl_periods'],
+                                    root_dir=config['root_dir'],
+                                    **config['stage1_kwargs'])
     else:
         stage1_results = input_files
 
@@ -169,6 +171,7 @@ def run_dms(config, input_files):
                                     miri_trace_width=config['miri_trace_width'],
                                     miri_background_width=config['miri_background_width'],
                                     miri_background_method=config['miri_background_method'],
+                                    root_dir=config['root_dir'],
                                     **config['stage2_kwargs'])
         stage2_results, deepframe = stage2_results
     else:
@@ -198,6 +201,7 @@ def run_dms(config, input_files):
                                     output_tag=config['output_tag'],
                                     do_plot=config['do_plots'],
                                     deepframe=this_deepframe,
+                                    root_dir=config['root_dir'],
                                     **config['stage3_kwargs'])
 
     return

@@ -60,17 +60,12 @@ from exotedrf.stage3 import run_stage3, do_box_extraction
 from exotedrf.optimize_helpers import extract_at_step
 
 
-
-base_outdir = cfg_early.get('pipeline_outputs_directory', 'pipeline_outputs_directory')
-
+root_dir = cfg_early.get('root_dir', './')
 # The stages write to pipeline_outputs_directory + '_' + output_tag (expanding '~'), so mirror
 # that here so cached outputs are found and invalidated in the right place.
-_output_tag = cfg_early.get('output_tag') or ''
+_output_tag = cfg_early.get('output_tag', '')
 _output_tag = '_' + _output_tag if _output_tag != '' else ''
-if os.path.isabs(base_outdir) or base_outdir.startswith('~'):
-    full_outdir = os.path.expanduser(base_outdir) + _output_tag
-else:
-    full_outdir = os.path.join('./', base_outdir + _output_tag)
+full_outdir = os.path.join(root_dir, 'pipeline_output_directory' + _output_tag)
 
 # Define where to store outputs for each pipeline stage
 outdir    = full_outdir

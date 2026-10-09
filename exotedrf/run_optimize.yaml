@@ -7,8 +7,10 @@
 crds_cache_path : './crds_cache/'
 crds_context: 'jwst_1322.pmap'
 
+# Relative path to root directory where raw data is stored.
+# All outputs will be written to a new directory in root_dir called pipeline_outputs_directory.
+root_dir : './'
 input_dir : 'DMS_uncal/' # input folder containing *uncal.fits
-pipeline_outputs_directory : 'pipeline_outputs_directory' # output folder
 input_filetag : 'uncal'
 
 # Instrument mode used.
