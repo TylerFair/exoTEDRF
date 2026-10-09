@@ -954,16 +954,14 @@ def backgroundstep_soss(datafile, background_model, deepstack, output_dir='./', 
                 scale_factor1 = _estimate_soss_background_scale(bkg_ratio)
                 if not np.isfinite(scale_factor1):
                     fancyprint('Could not calculate a finite SOSS background scale for group {}. '
-                               'Using scale factor 0.0 to avoid writing NaNs into the data.'
-                               .format(i), msg_type='WARNING')
+                               'Using scale factor of 0.0'.format(i), msg_type='WARNING')
                     scale_factor1 = 0.0
                     break
                 if scale_factor1 < 0:
                     model_median = np.nanmedian(background_model[xl:xu, yl:yu])
                     if not np.isfinite(model_median) or model_median == 0:
-                        fancyprint('Could not shift SOSS background scale for group {} because '
-                                   'the model region is non-finite or zero. Using scale factor '
-                                   '0.0.'.format(i), msg_type='WARNING')
+                        fancyprint('Could not shift SOSS background scale for group {}. Using '
+                                   'scale factor of 0.0.'.format(i), msg_type='WARNING')
                         scale_factor1 = 0.0
                         break
                     shifts[i] -= (scale_factor1 * model_median)
@@ -1579,8 +1577,7 @@ def run_stage2(results, mode, soss_background_model=None, baseline_ints=None, sa
                generate_lc=True, soss_inner_mask_width=40, soss_outer_mask_width=70,
                nirspec_mask_width=16, pixel_masks=None, f277w=None, do_plot=False, show_plot=False,
                centroids=None, miri_trace_width=20, miri_background_width=14,
-               miri_background_method='median',
-               pipeline_outputs_directory='pipeline_outputs_directory', **kwargs):
+               miri_background_method='median', **kwargs):
     """Run the exoTEDRF Stage 2 pipeline: spectroscopic processing, using a combination of official
     STScI DMS and custom steps. Documentation for the official DMS steps can be found here:
     https://jwst-pipeline.readthedocs.io/en/latest/jwst/pipeline/calwebb_spec2.html
@@ -1665,15 +1662,9 @@ def run_stage2(results, mode, soss_background_model=None, baseline_ints=None, sa
     if output_tag != '':
         output_tag = '_' + output_tag
     # Create output directories and define output paths.
-    # Handle absolute vs relative pipeline_outputs_directory paths.
-    import os
-    if os.path.isabs(pipeline_outputs_directory) or pipeline_outputs_directory.startswith('~'):
-        base_dir = os.path.expanduser(pipeline_outputs_directory) + output_tag
-    else:
-        base_dir = os.path.join(root_dir, pipeline_outputs_directory + output_tag)
-    utils.verify_path(base_dir)
-    utils.verify_path(os.path.join(base_dir, 'Stage2'))
-    outdir = os.path.join(base_dir, 'Stage2/')
+    utils.verify_path(root_dir + 'pipeline_outputs_directory' + output_tag)
+    utils.verify_path(root_dir + 'pipeline_outputs_directory' + output_tag + '/Stage2')
+    outdir = root_dir + 'pipeline_outputs_directory' + output_tag + '/Stage2/'
 
     if skip_steps is None:
         skip_steps = []
