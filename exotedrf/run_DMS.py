@@ -42,7 +42,9 @@ def save_config(config):
         output_tag = '_' + config['output_tag']
     else:
         output_tag = config['output_tag']
-    root_dir = 'pipeline_outputs_directory' + output_tag
+    root_dir = config['root_dir']
+    verify_path(root_dir)
+    root_dir += 'pipeline_outputs_directory' + output_tag
     verify_path(root_dir)
     root_dir += '/config_files'
     verify_path(root_dir)
@@ -56,8 +58,8 @@ def save_config(config):
     shutil.copy(config_file, copy_config)
     # Append time at which it was run.
     f = open(copy_config, 'a')
-    time = datetime.utcnow().isoformat(sep=' ', timespec='minutes')
-    f.write('\nRun at {}.'.format(time))
+    runtime = datetime.utcnow().isoformat(sep=' ', timespec='minutes')
+    f.write('\nRun at {}.'.format(runtime))
     f.close()
 
     return

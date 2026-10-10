@@ -8,8 +8,6 @@
 # ===== Key Parameters =====
 # Path to CRDS cache.
 crds_cache_path : './crds_cache/'
-# JWST pipeline pmap context.
-crds_context: 'jwst_1322.pmap'
 # Relative path to root directory where raw data is stored.
 # All outputs will be written to a new directory in root_dir called pipeline_outputs_directory.
 root_dir : './'
@@ -168,34 +166,22 @@ extract_width : [24, 26, 28, 30, 32, 34, 36]  # NIRSpec sweep: [4,5,6,7,8,9,10,1
 # ===== Other General Parameters =====
 # Name tag for output file directory.
 output_tag : ''
-#
-name_tag : ''
+# Suffix to give to this optimization run (optional).
+run_name : ''
 # Integrations of ingress and/or egress.
 baseline_ints : [50, -50]
 # If True, make diagnostic plots.
 do_plots : True
-# For optimization; white light curve weight.
+# For optimization; white light curve weight. Must be <= 1.
 w1 : 0.0
-# For optimization; spectral light curve weight.
+# For optimization; spectral light curve weight. Must be <= 1.
 w2 : 1.0
-
-# ===== Optimize Cost Function =====
-wave_range : null       # null uses optimizer defaults when spectral cost is active
-wave_range_plot : null
-ylim_plot : null
-
-
-
-# TODO: REMOVE THIS STUFF
-# Ad hoc optimizer modes.
-# If True, skip directly to Stage 3 using existing Stage 2 outputs and only optimize extract_width.
+# For optimization; wavelength range to optimize over. If None, use instrument defaults.
+wave_range : None
+# For optimization; wavelength range to show in summary plots. If None, use instrument defaults.
+wave_range_plot : None
+# If True, skip directly to Stage 3 and optimize extract_width.
 optimize_extract_width_only : False
-# If True, restart from existing *badpixstep.fits outputs, rerun PCA with remove_components, then
-# continue into Stage 3 and optional extract_width optimization.
+# If True, rerun only PCA with remove_components, then continue to Stage 3 and optimize extract_width.
 from_pca_only : False
-# If True during a Stage-3 rerun, read the fixed extraction width from an existing first-pass
-# Stage 3 spectrum header instead of sweeping widths again.
-reuse_first_pass_extract_width : False
-first_pass_extract_method : 'box'
-
 # ========================= END OPTIMIZER CONFIG FILE =========================
