@@ -41,10 +41,6 @@ os.environ.setdefault(
     "CRDS_SERVER_URL",
     "https://jwst-crds.stsci.edu"
 )
-os.environ.setdefault(
-    "CRDS_CONTEXT",
-    cfg_early.get("crds_context", "jwst_1322.pmap")
-)
 
 
 import numpy as np
@@ -66,7 +62,7 @@ root_dir = cfg_early.get('root_dir', './')
 # that here so cached outputs are found and invalidated in the right place.
 _output_tag = cfg_early.get('output_tag', '')
 _output_tag = '_' + _output_tag if _output_tag != '' else ''
-full_outdir = os.path.join(root_dir, 'pipeline_output_directory' + _output_tag)
+full_outdir = os.path.join(root_dir, 'pipeline_outputs_directory' + _output_tag)
 
 # Define where to store outputs for each pipeline stage
 outdir    = full_outdir
