@@ -37,6 +37,7 @@ from exotedrf.stage3 import run_stage3
 def save_config(config):
     """Save a copy of the DMS config file.
     """
+
     # Save a copy of the config file.
     if config['output_tag'] != '':
         output_tag = '_' + config['output_tag']
@@ -68,6 +69,7 @@ def save_config(config):
 def unpack_files(config):
     """Unpack input files.
     """
+
     # Unpack all files in the input directory.
     input_files = unpack_input_dir(config['input_dir'], mode=config['observing_mode'],
                                    filetag=config['input_filetag'],
