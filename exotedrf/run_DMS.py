@@ -87,6 +87,7 @@ def unpack_files(config):
 def run_dms(config, input_files):
     """Run the DMS.
     """
+
     # ===== Run Stage 1 =====
     if 1 in config['run_stages']:
         # Determine which steps to run and which to skip.

@@ -10,8 +10,11 @@ Script to run the exoTEDRF pipeline optimizer.
 
 import argparse
 import ast
+from astropy.io import fits
 import glob
+import numpy as np
 import os
+import pandas as pd
 import re
 import sys
 import time
@@ -19,6 +22,7 @@ import yaml
 
 from exotedrf import utils
 
+# ===== Setup =====
 early = argparse.ArgumentParser(add_help=False)
 early.add_argument(
     "--config", "-c",
@@ -42,11 +46,6 @@ os.environ.setdefault(
     "https://jwst-crds.stsci.edu"
 )
 
-
-import numpy as np
-import pandas as pd
-from astropy.io import fits
-
 from exotedrf.utils import parse_config, unpack_input_dir, fancyprint
 from exotedrf.stage1 import run_stage1
 from exotedrf.stage2 import run_stage2
@@ -54,7 +53,67 @@ from exotedrf.stage3 import run_stage3
 import exotedrf.optimize_utils as opt_utils
 from exotedrf.optimize_plotting import make_diagnostic_plot, plot_scatter, plot_cost
 
+# ===== Define Global Variables =====
+# All Pipeline Steps
+stage1_steps = ['DQInitStep', 'INLCorrStep', 'EmiCorrStep', 'SuperBiasStep', 'RefPixStep',
+                'DarkCurrentStep', 'OneOverFStep_grp', 'LinearityStep', 'JumpStep', 'RampFitStep',
+                'GainScaleStep']
+stage2_steps = ['AssignWCSStep', 'FlatFieldStep', 'OneOverFStep_int', 'BackgroundStep',
+                'BadPixStep', 'PCAReconstructStep']
 
+# Downstream Steps
+_STAGE1_AFTER_1OVERF = ['linearitystep', 'jump', 'rampfitstep', 'gainscalestep']
+_STAGE2_ALL = ['assignwcsstep', 'extract2dstep', 'sourcetypestep', 'wavecorrstep',
+               'flatfieldstep', 'photomstep', 'backgroundstep', 'oneoverfstep', 'badpixstep',
+               'pcareconstructstep']
+_STAGE2_AFTER_BKG = ['oneoverfstep', 'badpixstep', 'pcareconstructstep']
+
+# Optimization Checkpoints
+all_checkpoints = [
+    # Stage 1 checkpoints
+    {
+        'name': 'OneOverFStep_grp',
+        'stage': 1,
+        'params': ['soss_inner_mask_width', 'soss_outer_mask_width', 'nirspec_mask_width'],
+        'skip_before': ['DQInitStep', 'INLCorrStep', 'EmiCorrStep', 'SuperBiasStep', 'RefPixStep',
+                        'DarkCurrentStep'],
+        'skip_after': ['LinearityStep', 'JumpStep', 'RampFitStep', 'GainScaleStep'],
+    },
+    {
+        'name': 'JumpStep',
+        'stage': 1,
+        'params': ['time_jump_threshold', 'time_window'],
+        'skip_before': ['DQInitStep', 'INLCorrStep', 'EmiCorrStep', 'SuperBiasStep', 'RefPixStep',
+                        'DarkCurrentStep', 'OneOverFStep_grp', 'LinearityStep'],
+        'skip_after': ['RampFitStep', 'GainScaleStep'],
+    },
+    # Stage 2 checkpoints
+    {
+        'name': 'BackgroundStep',
+        'stage': 2,
+        'params': ['miri_trace_width', 'miri_background_width'],
+        'skip_before': ['AssignWCSStep', 'FlatFieldStep'],
+        'skip_after': ['OneOverFStep_int', 'BadPixStep', 'PCAReconstructStep'],
+    },
+    {
+        'name': 'BadPixStep',
+        'stage': 2,
+        'params': ['space_outlier_threshold', 'time_outlier_threshold', 'box_size', 'window_size'],
+        'skip_before': ['AssignWCSStep', 'FlatFieldStep', 'BackgroundStep', 'OneOverFStep_int'],
+        'skip_after': ['PCAReconstructStep'],
+    },
+    # Stage 3 checkpoint - only for Phase 2 (full dataset)
+    {
+        'name': 'Extract',
+        'stage': 3,
+        'params': ['extract_width'],
+        'skip_before': [],
+        'skip_after': [],
+        'phase_2_only': True,  # Only optimize in Phase 2
+    },
+]
+
+# Output Directories
 root_dir = cfg_early.get('root_dir', './')
 # The stages write to pipeline_outputs_directory + '_' + output_tag (expanding '~'), so mirror
 # that here so cached outputs are found and invalidated in the right place.
@@ -64,7 +123,7 @@ full_outdir = os.path.join(root_dir, 'pipeline_outputs_directory' + _output_tag)
 
 # Define where to store outputs for each pipeline stage
 outdir    = full_outdir
-outdir_f  = os.path.join(full_outdir, 'Files')
+outdir_f  = os.path.join(full_outdir, 'Optimizer_Files')
 outdir_s1 = os.path.join(full_outdir, 'Stage1/')
 outdir_s2 = os.path.join(full_outdir, 'Stage2/')
 outdir_s3 = os.path.join(full_outdir, 'Stage3/')
@@ -160,68 +219,6 @@ def phase1_spectral_wave_range(instrument, wave_range):
         return wave_range
 
     return None
-
-
-# ----------------------------------------
-# create filenames
-# ----------------------------------------
-def make_step_filenames(input_files, output_dir, possible_steps, 
-                        output_dir_2nd=None, possible_steps_2nd=None):
-    """
-    Search for files in output_dir matching any of the given step suffixes.
-    If found, return regenerated filenames aligned to input_files.
-    If not found and a second dir/list are given, search there.
-    If still nothing, raise FileNotFoundError.
-
-    Parameters
-    ----------
-    input_files : list[str]
-        List of original input file paths.
-    output_dir : str
-        Primary directory to search for processed files.
-    possible_steps : list[str]
-        Ordered list of step suffixes to try (e.g., ['darkcurrentstep', 'refpixstep']).
-    output_dir_2nd : str, optional
-        Secondary directory to search if nothing found in primary.
-    possible_steps_2nd : list[str], optional
-        Steps to try in secondary directory.
-
-    Returns
-    -------
-    list[str]
-        Paths to regenerated filenames for the found step.
-    """
-
-    def _regen(dirpath, step):
-        """
-        Given a directory and a step suffix, build output filenames
-        by replacing the suffix of each input file with the given step.
-        """
-        out = []
-        for f in input_files:
-            base = os.path.basename(f)                # just filename, no path
-            root = base[: base.rfind("_")]            # remove everything after last underscore
-            out.append(os.path.join(dirpath, f"{root}_{step}.fits"))
-        return out
-
-    # 1) Primary search: loop over possible steps and check for matches in output_dir
-    for step in possible_steps:
-        if glob.glob(os.path.join(output_dir, f"*_{step}.fits")):
-            print(f"Found step '{step}' in {output_dir}")
-            return _regen(output_dir, step)
-
-    # 2) Secondary search: same logic, but in output_dir_2nd if provided
-    if output_dir_2nd and possible_steps_2nd:
-        for step in possible_steps_2nd:
-            if glob.glob(os.path.join(output_dir_2nd, f"*_{step}.fits")):
-                print(f"Found step '{step}' in {output_dir_2nd}")
-                return _regen(output_dir_2nd, step)
-
-    # 3) No match found in either directory -> raise error
-    raise FileNotFoundError(
-        f"No matching step files found in '{output_dir}'"
-        + (f" or '{output_dir_2nd}'" if output_dir_2nd else "")
-    )
 
 
 def cost_function(st3, baseline_ints=None, wave_range=None, w1=0.0, w2=1.0, tol=0.05):
@@ -372,47 +369,6 @@ def cost_function(st3, baseline_ints=None, wave_range=None, w1=0.0, w2=1.0, tol=
     return cost, ptp2_spec_wave
 
 
-# ----------------------------------------
-# skip step list
-# ----------------------------------------
-def get_stage_skips(cfg, steps, always_skip=None, special_one_over_f=False):
-    """
-    Build a list of pipeline steps to skip based on a configuration dictionary.
-
-    Parameters
-    ----------
-    cfg : dict
-        Configuration mapping step names to actions (e.g., {'DarkCurrentStep': 'run'}).
-    steps : list[str]
-        Candidate step names to check.
-    always_skip : list[str], optional
-        Steps to skip unconditionally, regardless of cfg settings.
-    special_one_over_f : bool
-        If True, treat any step whose name starts with 'OneOverFStep' as 'OneOverFStep'
-        when adding to skip list. Useful if different variants exist.
-
-    Returns
-    -------
-    list[str]
-        Steps to skip for this run.
-    """
-
-    # Initialize skip set from always_skip (if given)
-    skips = set(always_skip or [])
-
-    # Check each candidate step in config
-    for step in steps:
-        # If the config marks this step to 'skip'
-        if cfg.get(step, 'run') == 'skip':
-            # Special handling for OneOverFStep variants
-            if step.startswith('OneOverFStep'):
-                step = 'OneOverFStep'
-            skips.add(step)
-
-    # Return as a list (order not guaranteed since set used)
-    return list(skips)
-
-
 def format_log_value(value):
     """Format optimizer values for TSV logging."""
 
@@ -430,7 +386,7 @@ def format_log_value(value):
 def prepare_cost_log(name_str, required_param_cols):
     """Ensure the cost log exists and can store the requested parameter columns."""
 
-    cost_path = f"{outdir_f}/Cost_{name_str}.txt"
+    cost_path = f"{outdir_f}/Cost_Summary{name_str}.txt"
     if os.path.exists(cost_path) and os.path.getsize(cost_path) > 0:
         df = pd.read_csv(cost_path, sep='\t', keep_default_na=False)
     else:
@@ -476,7 +432,7 @@ def append_cost_log_row(cost_path, param_cols, row_values, duration_s, cost):
 def append_scatter_log_row(name_str, scatter):
     """Append one scatter spectrum row to the scatter log."""
 
-    scatter_path = f"{outdir_f}/Scatter_{name_str}.txt"
+    scatter_path = f"{outdir_f}/LightCurve_Scatter{name_str}.txt"
     with open(scatter_path, 'a') as logs:
         logs.write(' '.join(f"{x:.10g}" for x in scatter) + '\n')
     return scatter_path
@@ -537,31 +493,6 @@ def resolve_existing_centroids(cfg, fileroot_noseg=None):
         "No centroid table available for Stage 3. Set 'centroids' in the config or provide "
         "a Stage 3/Stage 2 centroids.csv output."
     )
-
-
-def resolve_stage3_centroids(cfg):
-    """Backward-compatible alias for resolving centroids for Stage 3 extraction."""
-
-    return resolve_existing_centroids(cfg)
-
-
-def unpack_stage2_aux(stage2_aux):
-    """Interpret the auxiliary object returned by Stage 2 as centroids or a deepframe."""
-
-    centroids = None
-    deepframe = None
-
-    if isinstance(stage2_aux, np.ndarray):
-        centroids = pd.DataFrame(stage2_aux.T, columns=["xpos", "ypos"])
-    elif isinstance(stage2_aux, pd.DataFrame):
-        centroids = stage2_aux
-    elif isinstance(stage2_aux, str):
-        if stage2_aux.endswith('centroids.csv'):
-            centroids = pd.read_csv(stage2_aux, comment='#')
-        elif stage2_aux.endswith('deepframe.fits'):
-            deepframe = stage2_aux
-
-    return centroids, deepframe
 
 
 def find_existing_stage2_outputs(patterns, error_message):
@@ -665,7 +596,7 @@ def parse_extract_width_metadata(width_value):
 def find_best_logged_extract_width(name_str):
     """Read the best logged extract width from the optimizer cost table."""
 
-    cost_path = f"{outdir_f}/Cost_{name_str}.txt"
+    cost_path = f"{outdir_f}/Cost_Summary{name_str}.txt"
     if os.path.exists(cost_path) is not True:
         raise FileNotFoundError(f"No optimizer cost log found at {cost_path}")
 
@@ -701,7 +632,9 @@ def resolve_ad_hoc_extract_width(cfg):
         try:
             specfile = find_stage3_spectrum_file(source_method)
         except FileNotFoundError:
-            name_str = cfg.get('name_tag', 'default_run')
+            name_str = cfg.get('run_name', 'default_run')
+            if name_str != '':
+                name_str = '_' + name_str
             fancyprint("  No first-pass Stage 3 spectrum file found; falling back to optimizer "
                        "cost log for extract_width.")
             return find_best_logged_extract_width(name_str)
@@ -763,16 +696,6 @@ def select_best_trial(costs, param_name='parameter'):
     if best_idx is None:
         raise ValueError(f'All candidate values for {param_name} produced non-finite costs.')
     return best_idx
-
-
-# Cached step outputs downstream of each checkpoint. These must be invalidated together with the
-# checkpoint's own outputs, otherwise a reused output directory (e.g., from a previous run) would
-# feed stale downstream products into later sweeps.
-_STAGE1_AFTER_1OVERF = ['linearitystep', 'jump', 'rampfitstep', 'gainscalestep']
-_STAGE2_ALL = ['assignwcsstep', 'extract2dstep', 'sourcetypestep', 'wavecorrstep',
-               'flatfieldstep', 'photomstep', 'backgroundstep', 'oneoverfstep', 'badpixstep',
-               'pcareconstructstep']
-_STAGE2_AFTER_BKG = ['oneoverfstep', 'badpixstep', 'pcareconstructstep']
 
 
 def delete_checkpoint_outputs(checkpoint_name, outdir_s1, outdir_s2):
@@ -914,14 +837,11 @@ def run_ad_hoc_extract_width_search(stage2_inputs, cfg, centroids, deepframe, ba
     return final_stage3_results, best_extract_width, best_cost, best_row_idx
 
 
+def run_optimizer():
+    """Run the optimizer.
+    """
 
-
-# ----------------------------------------
-# main
-# ----------------------------------------
-
-def main():
-    # ===== SETUP =====
+    # ===== Initial Setup =====
     parser = argparse.ArgumentParser(description="exoTEDRF Optimizer")
     parser.add_argument("--config", "-c", default="run_optimize.yaml", help="Config YAML")
     args = parser.parse_args()
@@ -937,16 +857,14 @@ def main():
 
     # Key parameters
     baseline_ints = cfg.get('baseline_ints', [100, -100])
-    name_str = cfg.get('name_tag', 'default_run')
+    name_str = cfg.get('run_name', 'default_run')
+    if name_str != '':
+        name_str = '_' + name_str
     wave_range_plot = cfg.get('wave_range_plot', None)
     ylim_plot = cfg.get('ylim_plot', None)
     w1 = cfg.get('w1', 0.0)
     w2 = cfg.get('w2', 1.0)
     wave_range = resolve_spectral_wave_range(cfg, w2)
-    debug_mode = cfg.get('debug_mode', False)
-
-    if debug_mode:
-        fancyprint("DEBUG MODE ENABLED: Will use cached results (force_redo=False) for all stages", msg_type='WARNING')
 
     if wave_range_plot is None:
         wave_range_plot = wave_range
@@ -959,6 +877,9 @@ def main():
     if optimize_extract_width_only and from_pca_only:
         raise ValueError("optimize_extract_width_only and from_pca_only cannot both be True.")
 
+    # ==========================================================
+    # ===== Special Case 1: Optimize Extraction Width Only =====
+    # ==========================================================
     if optimize_extract_width_only:
         fancyprint(f"\n{'='*60}")
         fancyprint("EXTRACT WIDTH ONLY MODE ENABLED")
@@ -1035,7 +956,7 @@ def main():
         make_diagnostic_plot(stage3_results, name_str, baseline_ints=baseline_ints, obs=obs_early,
                              filter=filter_early, outdir=outdir_f)
 
-        outfile = os.path.join(outdir_f, f"Scatter_{name_str}.txt")
+        outfile = os.path.join(outdir_f, f"LightCurve_Scatter{name_str}.txt")
         specfile = find_stage3_spectrum_file(extract_method)
         plot_scatter(
             txtfile=outfile,
@@ -1045,7 +966,7 @@ def main():
             spectrum_files=[specfile],
             ylim=ylim_plot,
             style="line",
-            save_path=os.path.join(outdir_f, f"Scatter_Plot_{name_str}.png"),
+            save_path=os.path.join(outdir_f, f"Scatter_Plot{name_str}.png"),
         )
 
         t1 = time.perf_counter() - t0_total
@@ -1060,6 +981,9 @@ def main():
         fancyprint(f"{'='*60}\n")
         return
 
+    # ===========================================================
+    # ===== Special Case 2: PCA + Optimize Extraction Width =====
+    # ===========================================================
     if from_pca_only:
         fancyprint(f"\n{'='*60}")
         fancyprint("FROM PCA ONLY MODE ENABLED")
@@ -1092,10 +1016,8 @@ def main():
         fancyprint("Looking for centroids file...")
         centroids_df = load_ad_hoc_centroids(cfg)
 
-        pca_skip_steps = [
-            'AssignWCSStep', 'Extract2DStep', 'SourceTypeStep', 'WaveCorrStep',
-            'FlatFieldStep', 'BackgroundStep', 'OneOverFStep', 'BadPixStep'
-        ]
+        pca_skip_steps = ['AssignWCSStep', 'FlatFieldStep', 'BackgroundStep', 'OneOverFStep',
+                          'BadPixStep']
         fancyprint(f"Rerunning PCAReconstructStep with remove_components={remove_components}")
         stage2_results, deepframe = run_stage2(
             badpix_files,
@@ -1146,7 +1068,7 @@ def main():
         make_diagnostic_plot(stage3_results, name_str, baseline_ints=baseline_ints, obs=obs_early,
                              filter=filter_early, outdir=outdir_f)
 
-        outfile = os.path.join(outdir_f, f"Scatter_{name_str}.txt")
+        outfile = os.path.join(outdir_f, f"LightCurve_Scatter{name_str}.txt")
         specfile = find_stage3_spectrum_file(extract_method)
         plot_scatter(
             txtfile=outfile,
@@ -1156,7 +1078,7 @@ def main():
             spectrum_files=[specfile],
             ylim=ylim_plot,
             style="line",
-            save_path=os.path.join(outdir_f, f"Scatter_Plot_{name_str}.png"),
+            save_path=os.path.join(outdir_f, f"Scatter_Plot{name_str}.png"),
         )
 
         t1 = time.perf_counter() - t0_total
@@ -1172,7 +1094,9 @@ def main():
         fancyprint(f"{'='*60}\n")
         return
 
-    # ===== NORMAL MODE: FULL OPTIMIZATION =====
+    # ==============================================
+    # ===== Normal Mode: Run Full Optimization =====
+    # ==============================================
     # Load input files
     input_files = unpack_input_dir(
         cfg["input_dir"],
@@ -1243,60 +1167,9 @@ def main():
     current_best = {k: v[len(v) // 2] for k, v in param_ranges.items()}
     current_best.update(fixed_params)
 
-    logf = open(f"{outdir_f}/Cost_{name_str}.txt", "w")
-    logs = open(f"{outdir_f}/Scatter_{name_str}.txt", "w")
+    logf = open(f"{outdir_f}/Cost_Summary{name_str}.txt", "w")
+    logs = open(f"{outdir_f}/LightCurve_Scatter{name_str}.txt", "w")
     logf.write("\t".join(param_ranges.keys()) + "\tduration_s\tcost\n")
-
-    # ===== OPTIMIZATION CHECKPOINTS =====
-    # Define all possible optimization checkpoints
-    # These will be filtered based on which parameters are actually being optimized
-
-    all_checkpoints = [
-        # Stage 1 checkpoints
-        {
-            'name': 'OneOverFStep_grp',
-            'stage': 1,
-            'params': ['soss_inner_mask_width', 'soss_outer_mask_width', 'nirspec_mask_width'],
-            'skip_before': ['DQInitStep', 'INLCorrStep', 'EmiCorrStep',  'ResetStep',
-                           'SuperBiasStep', 'RefPixStep', 'DarkCurrentStep'],
-            'skip_after': ['LinearityStep', 'JumpStep', 'RampFitStep', 'GainScaleStep'],
-        },
-        {
-            'name': 'JumpStep',
-            'stage': 1,
-            'params': ['time_jump_threshold', 'time_window'],
-            'skip_before': ['DQInitStep', 'INLCorrStep', 'EmiCorrStep',  'ResetStep',
-                           'SuperBiasStep', 'RefPixStep', 'DarkCurrentStep',
-                           'OneOverFStep_grp', 'LinearityStep'],
-            'skip_after': ['RampFitStep', 'GainScaleStep'],
-        },
-        # Stage 2 checkpoints
-        {
-            'name': 'BackgroundStep',
-            'stage': 2,
-            'params': ['miri_trace_width', 'miri_background_width'],
-            'skip_before': ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep',
-                           'WaveCorrStep', 'FlatFieldStep'],
-            'skip_after': ['OneOverFStep_int', 'BadPixStep', 'PCAReconstructStep'],
-        },
-        {
-            'name': 'BadPixStep',
-            'stage': 2,
-            'params': ['space_outlier_threshold', 'time_outlier_threshold', 'box_size', 'window_size'],
-            'skip_before': ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep',
-                           'WaveCorrStep', 'FlatFieldStep', 'BackgroundStep', 'OneOverFStep_int'],
-            'skip_after': ['PCAReconstructStep'],
-        },
-        # Stage 3 checkpoint - only for Phase 2 (full dataset)
-        {
-            'name': 'Extract',
-            'stage': 3,
-            'params': ['extract_width'],
-            'skip_before': [],
-            'skip_after': [],
-            'phase_2_only': True,  # Only optimize in Phase 2
-        },
-    ]
 
     # Filter checkpoints to only include those with parameters being optimized
     optimization_checkpoints = []
@@ -1348,8 +1221,7 @@ def main():
                 fancyprint(f"\nTesting {param_name}={param_value}")
 
                 # Delete cached output for the optimization step to force rerun from that step
-                if not debug_mode:
-                    delete_checkpoint_outputs(checkpoint['name'], outdir_s1, outdir_s2)
+                delete_checkpoint_outputs(checkpoint['name'], outdir_s1, outdir_s2)
 
                 # run pipeline up to (including this step)
                 if checkpoint['stage'] == 1:
@@ -1357,9 +1229,6 @@ def main():
                     skip_list = checkpoint['skip_after'].copy()
 
                     # ALSO add user's skip preferences from YAML config
-                    stage1_steps = ['DQInitStep', 'INLCorrStep', 'EmiCorrStep',  'ResetStep', 'SuperBiasStep',
-                                    'RefPixStep', 'DarkCurrentStep', 'OneOverFStep_grp', 'LinearityStep', 'JumpStep',
-                                    'RampFitStep', 'GainScaleStep']
                     for step in stage1_steps:
                         if run_cfg.get(step) == 'skip' and step not in skip_list:
                             if step == 'OneOverFStep_grp':
@@ -1383,7 +1252,7 @@ def main():
                         soss_timeseries_o2=run_cfg.get('soss_timeseries_o2'),
                         save_results=True,
                         pixel_masks=run_cfg.get('outlier_maps'),
-                        force_redo=False if not debug_mode else False,
+                        force_redo=False,
                         flag_up_ramp=run_cfg.get('flag_up_ramp', False),
                         rejection_threshold=run_cfg.get('jump_threshold', 15),
                         flag_in_time=run_cfg.get('flag_in_time', True),
@@ -1411,9 +1280,6 @@ def main():
                 elif checkpoint['stage'] == 2:
                     # First, need Stage 1 results (use cached)
                     # Build skip list for Stage 1 based on user config
-                    stage1_steps = ['DQInitStep', 'INLCorrStep', 'EmiCorrStep',  'ResetStep', 'SuperBiasStep',
-                                    'RefPixStep', 'DarkCurrentStep', 'OneOverFStep_grp', 'LinearityStep', 'JumpStep',
-                                    'RampFitStep', 'GainScaleStep']
                     stage1_skip_for_s2 = []
                     for step in stage1_steps:
                         if run_cfg.get(step) == 'skip':
@@ -1460,9 +1326,6 @@ def main():
                     skip_list = checkpoint['skip_after'].copy()
 
                     # ALSO add user's skip preferences from YAML config
-                    stage2_steps = ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep', 'WaveCorrStep',
-                                    'FlatFieldStep', 'OneOverFStep_int', 'BackgroundStep', 
-                                    'BadPixStep', 'PCAReconstructStep']
                     for step in stage2_steps:
                         if run_cfg.get(step) == 'skip' and step not in skip_list:
                             if step == 'OneOverFStep_int':
@@ -1512,9 +1375,6 @@ def main():
                 elif checkpoint['stage'] == 3:
                     # Need Stage 1 and 2 completed first (use cached)
                     # Build skip list for Stage 1 based on user config
-                    stage1_steps = ['DQInitStep', 'INLCorrStep', 'EmiCorrStep',  'ResetStep', 'SuperBiasStep',
-                                    'RefPixStep', 'DarkCurrentStep', 'OneOverFStep_grp', 'LinearityStep', 'JumpStep',
-                                    'RampFitStep', 'GainScaleStep']
                     stage1_skip_for_s3 = []
                     for step in stage1_steps:
                         if run_cfg.get(step) == 'skip':
@@ -1558,9 +1418,6 @@ def main():
                     )
 
                     # Build skip list for Stage 2 based on user config
-                    stage2_steps = ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep', 'WaveCorrStep',
-                                    'FlatFieldStep', 'OneOverFStep_int', 'BackgroundStep', 
-                                    'BadPixStep', 'PCAReconstructStep']
                     stage2_skip_for_s3 = []
                     for step in stage2_steps:
                         if run_cfg.get(step) == 'skip':
@@ -1666,16 +1523,15 @@ def main():
             # not necessarily the winner. Delete them so the next pipeline call
             # (the following sweep, or Phase 2) regenerates this checkpoint --
             # and, lazily, its downstream caches -- with the winning value.
-            if not debug_mode and best_idx != len(param_values) - 1:
+            if best_idx != len(param_values) - 1:
                 delete_checkpoint_outputs(checkpoint['name'], outdir_s1, outdir_s2)
 
     logf.close()
     logs.close()
 
- 
     # Only plot if Phase 1 actually logged a sweep (e.g., not when only extract_width is
     # being optimized).
-    phase1_costs = pd.read_csv(f"{outdir_f}/Cost_{name_str}.txt", sep="\t")
+    phase1_costs = pd.read_csv(f"{outdir_f}/Cost_Summary{name_str}.txt", sep="\t")
     if len(phase1_costs) > 0:
         fancyprint("\n=== Plotting optimization results ===")
         plot_cost(name_str, outdir=outdir_f)
@@ -1692,9 +1548,6 @@ def main():
     final_cfg.update(current_best)
 
     # Build skip lists for Stage 1 and Stage 2 based on config settings
-    stage1_steps = ['DQInitStep', 'INLCorrStep', 'EmiCorrStep',  'ResetStep', 'SuperBiasStep',
-                    'RefPixStep', 'DarkCurrentStep', 'OneOverFStep_grp', 'LinearityStep', 'JumpStep',
-                    'RampFitStep', 'GainScaleStep']
     stage1_skip = []
     for step in stage1_steps:
         if final_cfg.get(step) == 'skip':
@@ -1741,9 +1594,6 @@ def main():
     )
 
     # Build skip list for Stage 2
-    stage2_steps = ['AssignWCSStep', 'Extract2DStep', 'SourceTypeStep', 'WaveCorrStep',
-                    'FlatFieldStep', 'OneOverFStep_int', 'BackgroundStep', 
-                    'BadPixStep', 'PCAReconstructStep']
     stage2_skip = []
     for step in stage2_steps:
         if final_cfg.get(step) == 'skip':
@@ -1818,8 +1668,8 @@ def main():
         extract_costs = []
 
         # Reopen log files to append extract_width optimization results
-        logf = open(f"{outdir_f}/Cost_{name_str}.txt", "a")
-        logs = open(f"{outdir_f}/Scatter_{name_str}.txt", "a")
+        logf = open(f"{outdir_f}/Cost_Summary{name_str}.txt", "a")
+        logs = open(f"{outdir_f}/LightCurve_Scatter{name_str}.txt", "a")
 
         for width in extract_widths:
             fancyprint(f"\nTesting extract_width={width}")
@@ -1943,7 +1793,7 @@ def main():
             **final_cfg.get('stage3_kwargs', {})
         )
 
-    #  diagnostics
+    #  Diagnostics
     make_diagnostic_plot(stage3_results, name_str, baseline_ints=baseline_ints, obs=obs_early,
                          filter=filter_early, outdir=outdir_f)
 
@@ -1952,7 +1802,7 @@ def main():
     #  products and must not be plotted on the final wavelength axis.
     _, final_scatter = cost_function(stage3_results, baseline_ints=baseline_ints,
                                      wave_range=wave_range, w1=w1, w2=w2)
-    outfile = os.path.join(outdir_f, f"Scatter_final_{name_str}.txt")
+    outfile = os.path.join(outdir_f, f"LightCurve_Scatter_Final{name_str}.txt")
     with open(outfile, "w") as f:
         f.write(" ".join(f"{x:.10g}" for x in final_scatter) + "\n")
     specfile = find_stage3_spectrum_file(final_cfg['extract_method'])
@@ -1965,7 +1815,7 @@ def main():
         spectrum_files=[specfile],
         ylim=ylim_plot,
         style="line",
-        save_path=os.path.join(outdir_f, f"Scatter_Plot_{name_str}.png"),
+        save_path=os.path.join(outdir_f, f"Scatter_Plot{name_str}.png"),
     )
 
     # ===== ARCHIVE TO LONG-TERM STORAGE =====
@@ -2029,5 +1879,8 @@ def main():
     fancyprint(f"OPTIMAL PARAMETERS: {current_best}")
     fancyprint(f"{'='*60}\n")
 
+
+# ===== Do Stuff =====
 if __name__ == "__main__":
-    main() 
+    run_optimizer()
+    fancyprint('Done')

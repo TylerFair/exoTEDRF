@@ -122,7 +122,7 @@ def make_diagnostic_plot(st3, name_str, baseline_ints, obs, filter, outdir):
     plt.xlabel("Integration Number")
     plt.ylabel("Normalized White Flux")
     plt.title("Normalized White Light Curve")
-    plt.savefig(f"{outdir}/WhiteLightCurve_{name_str}.png", dpi=300)
+    plt.savefig(f"{outdir}/WhiteLightCurve{name_str}.png", dpi=300)
     plt.close()
 
     # --- Normalized flux image with true wavelength mapping ---
@@ -161,7 +161,7 @@ def make_diagnostic_plot(st3, name_str, baseline_ints, obs, filter, outdir):
     plt.ylabel("Wavelength (µm)")
     plt.title("Normalized Flux Image")
     plt.colorbar(label="Relative Flux")
-    plt.savefig(f"{outdir}/2D_LightCurves_{name_str}.png", dpi=300)
+    plt.savefig(f"{outdir}/2D_LightCurves{name_str}.png", dpi=300)
     plt.close()
 
 
@@ -179,7 +179,7 @@ def plot_cost(name_str, outdir, table_height=0.4):
         Direcory to which to save outputs.
     """
 
-    df = pd.read_csv(f"{outdir}/Cost_{name_str}.txt",
+    df = pd.read_csv(f"{outdir}/Cost_Summary{name_str}.txt",
                      delimiter="\t", keep_default_na=False)
 
     # Remove rows where 'cost' is not numeric, then keep the surviving values
@@ -187,7 +187,7 @@ def plot_cost(name_str, outdir, table_height=0.4):
     df["cost"] = pd.to_numeric(df["cost"], errors="coerce")
     df = df[df["cost"].notna()].reset_index(drop=True)
     if df.empty:
-        raise ValueError(f"No finite numeric costs found in {outdir}/Cost_{name_str}.txt")
+        raise ValueError(f"No finite numeric costs found in {outdir}/Cost_Summar{name_str}.txt")
 
     # Get all parameter columns (exclude 'duration_s' and 'cost' at the end)
     param_cols = df.columns[:-2]
@@ -338,7 +338,7 @@ def plot_cost(name_str, outdir, table_height=0.4):
         else:
             cell.set_fontsize(10)  # data
 
-    fig.savefig(f"{outdir}/Cost_Summary_{name_str}.png",
+    fig.savefig(f"{outdir}/Cost_Summary{name_str}.png",
                 dpi=300, bbox_inches='tight')
 
 
