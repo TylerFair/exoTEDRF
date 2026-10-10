@@ -35,7 +35,7 @@ By default, only the spectroscopic term is used (``w1: 0``, ``w2: 1``). In gener
 Running the Optimizer
 ---------------------
 
-#. Copy the optimize.py script and the run_optimize.yaml config file into your working directory.
+#. Copy the run_optimize.py script and the run_optimize.yaml config file into your working directory.
 #. Fill out the top part of the yaml file just as you would for run_DMS.yaml (input directory, observing mode, which steps to run, etc.).
 #. Set ``baseline_ints`` to cover the out-of-transit integrations of your observation. These are used both in the reduction and for computing the cost.
 #. Choose which parameters to optimize (see below).
@@ -43,9 +43,7 @@ Running the Optimizer
 
     .. code-block:: bash
 
-        python optimize.py --config run_optimize.yaml
-
-Note that, unlike run_DMS.py, the config file is passed with the ``--config`` (or ``-c``) flag.
+        python run_optimize.py run_optimize.yaml
 
 
 Choosing Parameters to Sweep
@@ -91,11 +89,11 @@ Make sure that any instrument-specific parameters that don't apply to your obser
 Outputs
 -------
 
-All optimizer outputs are saved to the Files subdirectory of the pipeline output directory, tagged with the ``name_tag`` given in the config file:
+All optimizer outputs are saved to the Optimizer_Files subdirectory of the pipeline_outputs_directory, tagged with the ``run_name`` tag given in the config file:
 
-    - ``Cost_<name_tag>.txt``: A table of every trial, with the parameter values used, the runtime, and the resulting cost.
-    - ``Cost_<name_tag>.png``: A summary plot of the cost for each sweep (normalized within each sweep), with the best value highlighted, along with a table of the winning parameters.
-    - ``Scatter_<name_tag>.txt`` and ``Scatter_Plot_<name_tag>.png``: The scatter as a function of wavelength for each trial. These are useful to check that the improvement is not driven by just a handful of wavelength channels.
+    - ``Cost_Summary_<name_tag>.txt``: A table of every trial, with the parameter values used, the runtime, and the resulting cost.
+    - ``Cost_Summary_<name_tag>.png``: A summary plot of the cost for each sweep (normalized within each sweep), with the best value highlighted, along with a table of the winning parameters.
+    - ``LightCurve_Scatter_<name_tag>.txt`` and ``LightCurve_Scatter_Plot_<name_tag>.png``: The scatter as a function of wavelength for each trial. These are useful to check that the improvement is not driven by just a handful of wavelength channels.
 
 The final, optimized Stage 1 to 3 products are saved to the usual Stage1, Stage2, and Stage3 directories, just as with run_DMS.py, and the winning parameters are printed at the end of the run.
 These can then be copied into run_DMS.yaml if you'd like to reproduce, or further tweak, the reduction later on.
