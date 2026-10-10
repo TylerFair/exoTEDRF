@@ -113,6 +113,13 @@ all_checkpoints = [
     },
 ]
 
+# Default Wavebands
+bands = {
+    'miri':    (5.0, 12.0),
+    'nirspec': (1.0, 5.0),
+    'niriss':  (0.6, 2.8)
+}
+
 # Output Directories
 root_dir = cfg_early.get('root_dir', './')
 # The stages write to pipeline_outputs_directory + '_' + output_tag (expanding '~'), so mirror
@@ -122,8 +129,8 @@ _output_tag = '_' + _output_tag if _output_tag != '' else ''
 full_outdir = os.path.join(root_dir, 'pipeline_outputs_directory' + _output_tag)
 
 # Define where to store outputs for each pipeline stage
-outdir    = full_outdir
-outdir_f  = os.path.join(full_outdir, 'Optimizer_Files')
+outdir = full_outdir
+outdir_f = os.path.join(full_outdir, 'Optimizer_Files')
 outdir_s1 = os.path.join(full_outdir, 'Stage1/')
 outdir_s2 = os.path.join(full_outdir, 'Stage2/')
 outdir_s3 = os.path.join(full_outdir, 'Stage3/')
@@ -139,26 +146,15 @@ obs_early = (cfg_early.get('observing_mode') or '').lower()
 # Detector filter in lowercase (e.g., 'clear', 'nrs1', 'nrs2')
 filter_early = (cfg_early.get('filter_detector') or '').lower()
 # Wavelength range limits for analysis and plotting (if provided in config)
-wave_range_early      = cfg_early.get('wave_range', None)
+wave_range_early = cfg_early.get('wave_range', None)
 wave_range_plot_early = cfg_early.get('wave_range_plot', None)
-# Weighting factors for cost function or metrics,
-# w1 = whitelight weight, w2 = spectral weight
-w1 = cfg_early.get('w1', 0.0)
-w2 = cfg_early.get('w2', 1.0)
-
-# Allowed wavelength coverage for each instrument (microns)
-bands = {
-    'miri':    (5.0, 12.0),
-    'nirspec': (1.0, 5.0),
-    'niriss':  (0.6, 2.8)
-}
 
 # Loop through instruments to find the matching one for this observation
 for key, (lo, hi) in bands.items():
     if key in obs_early:
         for name, rng in (('wave_range', wave_range_early),
                           ('wave_range_plot', wave_range_plot_early)):
-            if rng is not None and not (lo <= min(rng) and max(rng) <= hi):
+            if rng is not None and not (lo <= np.min(rng) and np.max(rng) <= hi):
                 raise ValueError(f"{name}={rng!r} out of allowed band [{lo}, {hi}]")
         break
 # If no instrument key matched the observation mode, throw an error
@@ -166,64 +162,44 @@ else:
     raise ValueError(f"Unrecognized observing_mode: {cfg_early.get('observing_mode')}")
 
 
-def is_null_like(value):
-    """Return True for config values that should behave like None."""
-    return value in [None, 'None', 'none', 'null', 'NULL', '']
+def resolve_spectral_wave_range(cfg):
+    """Use the configured wavelength range, or an instrument default when spectral cost is active.
+    """
 
+    wave_range = cfg.get('wave_range', None)
+    obs = (cfg.get('observing_mode') or '').lower()
+    det = (cfg.get('filter_detector') or '').lower()
 
-def default_spectral_wave_range(observing_mode, filter_detector=None):
-    """Return the high-signal wavelength range to use for spectral optimization."""
-    obs = (observing_mode or '').lower()
-    det = (filter_detector or '').lower()
+    # Default wavelength ranges.
+    if wave_range is None:
+        user = 'user-defined'
+        if 'niriss' in obs:
+            return [1.0, 2.0]
+        elif 'nirspec' in obs:
+            if det == 'nrs1':
+                return [3.0, 3.5]
+            elif det == 'nrs2':
+                return [4.0, 4.5]
+            else:
+                raise ValueError('NIRSpec optimization requires filter_detector=NRS1 or NRS2.')
+        elif 'miri' in obs:
+            return [5.0, 10.0]
+    else:
+        user = 'default'
 
-    if 'niriss' in obs:
-        return [1.0, 2.0]
-    if 'nirspec' in obs:
-        if det == 'nrs1':
-            return [3.0, 3.5]
-        if det == 'nrs2':
-            return [4.0, 4.5]
-        raise ValueError('NIRSpec spectral optimization requires filter_detector=NRS1 or NRS2.')
-    if 'miri' in obs:
-        return [5.0, 10.0]
+    # Format print string.
+    if obs == 'nirspec':
+        inst_str = obs + ' ' + det
+    else:
+        inst_str = obs
+    fancyprint('Using {} wavelength range of {} for {} spectral optimization.'
+               ''.format(user, wave_range, inst_str))
 
-    return None
-
-
-def resolve_spectral_wave_range(cfg, w2):
-    """Use the configured wavelength range, or an instrument default when spectral cost is active."""
-
-    configured = cfg.get('wave_range', None)
-    if not is_null_like(configured):
-        return configured
-    if w2 == 0:
-        return None
-
-    wave_range = default_spectral_wave_range(
-        cfg.get('observing_mode'),
-        cfg.get('filter_detector')
-    )
-    if wave_range is not None:
-        fancyprint('Using default spectral optimization wave_range={} for {} {}.'
-                   .format(wave_range, cfg.get('observing_mode'),
-                           cfg.get('filter_detector')))
     return wave_range
 
 
-def phase1_spectral_wave_range(instrument, wave_range):
-    """Return the wavelength range usable by the fast optimizer-side extraction."""
-
-    if is_null_like(wave_range):
-        return None
-    if instrument == 'NIRISS':
-        return wave_range
-
-    return None
-
-
 def cost_function(st3, baseline_ints=None, wave_range=None, w1=0.0, w2=1.0, tol=0.05):
-    """
-    Compute a combined white-light + spectral P2P (point-to-point) metric.
+    """Compute a combined white-light + spectral P2P (point-to-point) metric.
 
     Parameters
     ----------
@@ -271,33 +247,33 @@ def cost_function(st3, baseline_ints=None, wave_range=None, w1=0.0, w2=1.0, tol=
         elif wave.ndim != 1:
             raise ValueError(f"Expected 1D wavelength axis, got wave.ndim={wave.ndim}")
 
-    # ======== WHITE-LIGHT TERM ========
-    # Collapse all wavelengths into single white-light curve
-    white      = np.nansum(flux, axis=1)
-    white      = white[~np.isnan(white)]
+    # ======== WHITE LIGHT TERM ========
+    # Collapse all wavelengths into single white light curve
+    white = np.nansum(flux, axis=1)
+    white = white[~np.isnan(white)]
     norm_white = white / np.median(white)
     # 2nd finite difference (neighbour avg - centre)
-    d2_white   = 0.5*(norm_white[:-2] + norm_white[2:]) - norm_white[1:-1]
+    d2_white = 0.5*(norm_white[:-2] + norm_white[2:]) - norm_white[1:-1]
     ptp2_white = np.nanmedian(np.abs(d2_white))
 
     # ======== SPECTRAL TERM (PER-WAVELENGTH P2P) ========
     wave_meds = np.nanmedian(flux, axis=0, keepdims=True)
     norm_spec = flux / wave_meds
-    d2_spec   = 0.5*(norm_spec[:-2] + norm_spec[2:]) - norm_spec[1:-1]
+    d2_spec = 0.5*(norm_spec[:-2] + norm_spec[2:]) - norm_spec[1:-1]
 
     # Select baseline integrations for spectral metric
     if baseline_ints is None:
         ptp2_spec_wave = np.nanmedian(np.abs(d2_spec), axis=0)
     elif len(baseline_ints) == 1:
-        N = int(baseline_ints[0])
-        ptp2_spec_wave = np.nanmedian(np.abs(d2_spec[:N]), axis=0)
+        nn = int(baseline_ints[0])
+        ptp2_spec_wave = np.nanmedian(np.abs(d2_spec[:nn]), axis=0)
     elif len(baseline_ints) == 2:
-        Nlow, Nhigh = map(int, baseline_ints)
-        low, high = d2_spec[:Nlow], d2_spec[Nhigh:]
-        # Phase 1 only uses the first segment, so a positive Nhigh can lie beyond its end. Fall
+        nlow, nhigh = map(int, baseline_ints)
+        low, high = d2_spec[:nlow], d2_spec[nhigh:]
+        # Phase 1 only uses the first segment, so a positive nhigh can lie beyond its end. Fall
         # back on whichever baseline is available rather than returning an all-NaN metric.
         if len(low) > 0 and len(high) > 0:
-            low_term  = np.nanmedian(np.abs(low), axis=0)
+            low_term = np.nanmedian(np.abs(low), axis=0)
             high_term = np.nanmedian(np.abs(high), axis=0)
             ptp2_spec_wave = 0.5 * (low_term + high_term)
         elif len(low) > 0 or len(high) > 0:
@@ -328,8 +304,10 @@ def cost_function(st3, baseline_ints=None, wave_range=None, w1=0.0, w2=1.0, tol=
             hi = wave_max
 
         # Distances from requested range edges
-        dist_lo = np.abs(wave - lo); dist_lo[~finite] = np.inf
-        dist_hi = np.abs(wave - hi); dist_hi[~finite] = np.inf
+        dist_lo = np.abs(wave - lo)
+        dist_lo[~finite] = np.inf
+        dist_hi = np.abs(wave - hi)
+        dist_hi[~finite] = np.inf
 
         idx_lo = int(np.argmin(dist_lo))
         idx_hi = int(np.argmin(dist_hi))
@@ -370,7 +348,8 @@ def cost_function(st3, baseline_ints=None, wave_range=None, w1=0.0, w2=1.0, tol=
 
 
 def format_log_value(value):
-    """Format optimizer values for TSV logging."""
+    """Format optimizer values for TSV logging.
+    """
 
     if isinstance(value, np.ndarray):
         value = value.tolist()
@@ -384,7 +363,8 @@ def format_log_value(value):
 
 
 def prepare_cost_log(name_str, required_param_cols):
-    """Ensure the cost log exists and can store the requested parameter columns."""
+    """Ensure the cost log exists and can store the requested parameter columns.
+    """
 
     cost_path = f"{outdir_f}/Cost_Summary{name_str}.txt"
     if os.path.exists(cost_path) and os.path.getsize(cost_path) > 0:
@@ -421,7 +401,8 @@ def prepare_cost_log(name_str, required_param_cols):
 
 
 def append_cost_log_row(cost_path, param_cols, row_values, duration_s, cost):
-    """Append one optimizer result row to the cost log."""
+    """Append one optimizer result row to the cost log.
+    """
 
     fields = [format_log_value(row_values.get(col, '')) for col in param_cols]
     fields.extend([f"{duration_s:.1f}", f"{cost:.12f}"])
@@ -430,7 +411,8 @@ def append_cost_log_row(cost_path, param_cols, row_values, duration_s, cost):
 
 
 def append_scatter_log_row(name_str, scatter):
-    """Append one scatter spectrum row to the scatter log."""
+    """Append one scatter spectrum row to the scatter log.
+    """
 
     scatter_path = f"{outdir_f}/LightCurve_Scatter{name_str}.txt"
     with open(scatter_path, 'a') as logs:
@@ -439,7 +421,8 @@ def append_scatter_log_row(name_str, scatter):
 
 
 def load_ad_hoc_centroids(cfg, stage2_source_dir=None):
-    """Load centroids from the config or existing pipeline outputs."""
+    """Load centroids from the config or existing pipeline outputs.
+    """
 
     centroids_path = cfg.get('centroids')
     if centroids_path not in [None, 'None', 'null', '']:
@@ -467,7 +450,8 @@ def load_ad_hoc_centroids(cfg, stage2_source_dir=None):
 
 def resolve_existing_centroids(cfg, fileroot_noseg=None):
     """Resolve the centroid table for a Stage 3 extraction or rerun. If `fileroot_noseg` is
-    given, only centroid tables written for that dataset are considered."""
+    given, only centroid tables written for that dataset are considered.
+    """
 
     centroids_path = cfg.get('centroids')
     if centroids_path not in [None, 'None', 'null', '']:
@@ -496,7 +480,8 @@ def resolve_existing_centroids(cfg, fileroot_noseg=None):
 
 
 def find_existing_stage2_outputs(patterns, error_message):
-    """Return the first matching set of Stage 2 files from a list of glob patterns."""
+    """Return the first matching set of Stage 2 files from a list of glob patterns.
+    """
 
     for pattern in patterns:
         found_files = sorted(glob.glob(pattern))
@@ -507,7 +492,8 @@ def find_existing_stage2_outputs(patterns, error_message):
 
 
 def resolve_ad_hoc_deepframe(cfg, stage2_source_dir=None):
-    """Resolve the deepframe path for ad hoc Stage 3 runs."""
+    """Resolve the deepframe path for ad hoc Stage 3 runs.
+    """
 
     deepframe = cfg.get('deepframe')
     if deepframe not in [None, 'None', 'null', '']:
@@ -523,13 +509,15 @@ def resolve_ad_hoc_deepframe(cfg, stage2_source_dir=None):
 
 
 def resolve_extract1d_kwargs(cfg):
-    """Return the Stage 3 Extract1dStep kwargs block, if present."""
+    """Return the Stage 3 Extract1dStep kwargs block, if present.
+    """
 
     return cfg.get('stage3_kwargs', {}).get('Extract1dStep', {})
 
 
 def find_stage3_spectrum_file(extract_method):
-    """Return the first Stage 3 full-resolution spectrum file for the requested method."""
+    """Return the first Stage 3 full-resolution spectrum file for the requested method.
+    """
 
     pattern = os.path.join(outdir_s3, f"*_{extract_method}_spectra_fullres.fits")
     matches = sorted(glob.glob(pattern))
@@ -539,7 +527,8 @@ def find_stage3_spectrum_file(extract_method):
 
 
 def parse_extract_width_metadata(width_value):
-    """Parse an extraction width from YAML/header metadata into a scalar or asymmetric dict."""
+    """Parse an extraction width from YAML/header metadata into a scalar or asymmetric dict.
+    """
 
     if width_value in [None, 'None', 'null', '']:
         return None
@@ -594,10 +583,11 @@ def parse_extract_width_metadata(width_value):
 
 
 def find_best_logged_extract_width(name_str):
-    """Read the best logged extract width from the optimizer cost table."""
+    """Read the best logged extract width from the optimizer cost table.
+    """
 
     cost_path = f"{outdir_f}/Cost_Summary{name_str}.txt"
-    if os.path.exists(cost_path) is not True:
+    if not os.path.exists(cost_path):
         raise FileNotFoundError(f"No optimizer cost log found at {cost_path}")
 
     df = pd.read_csv(cost_path, sep='\t', keep_default_na=False)
@@ -618,7 +608,8 @@ def find_best_logged_extract_width(name_str):
 
 
 def resolve_ad_hoc_extract_width(cfg):
-    """Resolve the extraction width to use for ad hoc Stage-3 reruns."""
+    """Resolve the extraction width to use for ad hoc Stage-3 reruns.
+    """
 
     if cfg.get('optimize_extract_width', False):
         return cfg.get('extract_width')
@@ -653,7 +644,8 @@ def resolve_ad_hoc_extract_width(cfg):
 
 
 def run_stage3_for_width(stage2_inputs, cfg, centroids, deepframe, extract_width):
-    """Run Stage 3 once for a specific extraction width."""
+    """Run Stage 3 once for a specific extraction width.
+    """
 
     return run_stage3(
         stage2_inputs,
@@ -685,6 +677,7 @@ def select_best_trial(costs, param_name='parameter'):
     could otherwise be selected as the winner. Non-finite costs are skipped;
     ties keep the earliest candidate.
     """
+
     best_idx = None
     best_cost = None
     for idx, cost in enumerate(costs):
@@ -700,7 +693,9 @@ def select_best_trial(costs, param_name='parameter'):
 
 def delete_checkpoint_outputs(checkpoint_name, outdir_s1, outdir_s2):
     """Delete a checkpoint step's cached outputs, and those of every step downstream of it, so
-    the next pipeline call recomputes them."""
+    the next pipeline call recomputes them.
+    """
+
     patterns = []
     downstream = []
     if checkpoint_name == 'OneOverFStep_grp':
@@ -744,6 +739,7 @@ def stage1_kwargs_with_winners(run_cfg):
     so later sweeps and the Phase 2 run silently fell back to the step default
     instead of the current best (or fixed) value.
     """
+
     kwargs = dict(run_cfg.get('stage1_kwargs') or {})
     time_window = run_cfg.get('time_window')
     if isinstance(time_window, (int, float, np.integer, np.floating)):
@@ -755,7 +751,9 @@ def stage1_kwargs_with_winners(run_cfg):
 
 def stage2_kwargs_with_winners(run_cfg):
     """Stage 2 kwargs with current scalar box_size/window_size forwarded to
-    BadPixStep (same defect and fix as stage1_kwargs_with_winners)."""
+    BadPixStep (same defect and fix as stage1_kwargs_with_winners).
+    """
+
     kwargs = dict(run_cfg.get('stage2_kwargs') or {})
     step_kwargs = dict(kwargs.get('BadPixStep') or {})
     for key in ('box_size', 'window_size'):
@@ -769,7 +767,8 @@ def stage2_kwargs_with_winners(run_cfg):
 
 def run_ad_hoc_extract_width_search(stage2_inputs, cfg, centroids, deepframe, baseline_ints,
                                     wave_range, w1, w2, name_str, base_row_values):
-    """Append an ad hoc Stage 3 extraction sweep to the optimizer logs."""
+    """Append an ad hoc Stage 3 extraction sweep to the optimizer logs.
+    """
 
     if cfg.get('optimize_extract_width', False):
         extract_widths = cfg['extract_width']
@@ -852,7 +851,6 @@ def run_optimizer():
         raise ValueError("extract_method must be one of 'box', 'atoca', or 'optimal'; got "
                          "{!r}.".format(cfg.get('extract_method')))
     obs = (cfg.get('observing_mode') or '').lower()
-    filter_det = (cfg.get('filter_detector') or '').lower()
     instrument = obs.split('/')[0].upper() if '/' in obs else obs.upper()
 
     # Key parameters
@@ -864,7 +862,7 @@ def run_optimizer():
     ylim_plot = cfg.get('ylim_plot', None)
     w1 = cfg.get('w1', 0.0)
     w2 = cfg.get('w2', 1.0)
-    wave_range = resolve_spectral_wave_range(cfg, w2)
+    wave_range = resolve_spectral_wave_range(cfg)
 
     if wave_range_plot is None:
         wave_range_plot = wave_range
@@ -874,6 +872,7 @@ def run_optimizer():
     from_pca_only = cfg.get('from_pca_only', cfg.get('optimize_from_pca_only', False))
     extract_method = cfg.get('extract_method', 'box')
 
+    # Can only run one of the above at a atime.
     if optimize_extract_width_only and from_pca_only:
         raise ValueError("optimize_extract_width_only and from_pca_only cannot both be True.")
 
@@ -885,20 +884,6 @@ def run_optimizer():
         fancyprint("EXTRACT WIDTH ONLY MODE ENABLED")
         fancyprint("Skipping directly to Stage 3 using existing Stage 2 outputs")
         fancyprint(f"{'='*60}\n")
-
-        optimize_flags = [
-            k for k in cfg.keys()
-            if k.startswith('optimize_') and k not in ['optimize_extract_width_only',
-                                                       'optimize_from_pca_only']
-        ]
-        for flag in optimize_flags:
-            if flag == 'optimize_extract_width':
-                continue
-            elif cfg[flag]:
-                raise ValueError(
-                    f"{flag} must be False when optimize_extract_width_only=True. "
-                    "Only the Stage 3 extraction may be rerun in this mode."
-                )
 
         # Determine the source directory for Stage 2 inputs
         stage2_source_dir = outdir_s2
@@ -989,19 +974,6 @@ def run_optimizer():
         fancyprint("FROM PCA ONLY MODE ENABLED")
         fancyprint("Restarting from existing BadPix outputs and rerunning PCA/Stage 3 only")
         fancyprint(f"{'='*60}\n")
-
-        optimize_flags = [
-            k for k in cfg.keys()
-            if k.startswith('optimize_') and k not in ['optimize_extract_width',
-                                                       'optimize_extract_width_only',
-                                                       'optimize_from_pca_only']
-        ]
-        for flag in optimize_flags:
-            if cfg[flag]:
-                raise ValueError(
-                    f"{flag} must be False when from_pca_only=True. "
-                    "Only optimize_extract_width may be True in this mode."
-                )
 
         remove_components = cfg.get('remove_components')
         if remove_components in [None, 'None', 'null', '']:
@@ -1481,7 +1453,10 @@ def run_optimizer():
 
                 # The fast NIRSpec/MIRI optimizer-side extraction uses pixel indices as
                 # placeholder wavelengths, so micron-space filtering is only valid here for SOSS.
-                phase1_wave_range = phase1_spectral_wave_range(instrument, wave_range)
+                if instrument.lower() == 'niriss' and wave_range is not None:
+                    phase1_wave_range = wave_range
+                else:
+                    phase1_wave_range = None
 
                 cost, scatter = cost_function(
                     spectral_dict,
