@@ -3,7 +3,7 @@
 """
 @author: PSD, modified by TRF
 
-Helper functions for the optimize.py script with handling of DQ flags and extraction.
+Helper functions for the run_optimize.py script with handling of DQ flags and extraction.
 """
 
 from astropy.io import fits
@@ -16,46 +16,6 @@ from tqdm import tqdm
 from exotedrf.stage3 import get_wave_soss, trace_spectrum, _parse_extraction_width
 from exotedrf import utils
 from exotedrf.utils import fancyprint
-
-
-def last_scoreable_group(dq):
-    """Index of the last group that still has usable pixels.
-
-    Optimizer trials taken before RampFit are scored on a single group of the
-    ramp, with every DQ-flagged pixel NaN-ed out. Normally that is the final
-    group, but a group whose DQ is set for EVERY pixel leaves nothing to
-    extract: the aperture is entirely NaN and `cost_function` returns NaN for
-    both its terms, so the whole sweep collapses.
-
-    MIRI hits this on every exposure, because DQInitStep flags the first and
-    last MIRI group DO_NOT_USE (stage1.py, flag_first/last_miri_frame). Only
-    the stage-1 checkpoints score a 4D product, so for MIRI this silently
-    disabled the `time_jump_threshold` and `time_window` sweeps.
-
-    Walking back to the last group that is not fully flagged restores a
-    meaningful comparison and is a no-op for SOSS/NIRSpec, whose final group
-    is not flagged wholesale.
-
-    Parameters
-    dq : array
-        4D group DQ cube, (nint, ngroup, y, x).
-
-    Returns
-    group : int
-        Group index to mask and score. Falls back to -1 if every group is
-        fully flagged.
-    """
-    
-    ngroup = dq.shape[1]
-    for group in range(ngroup - 1, -1, -1):
-        if not np.all(dq[:, group] > 0):
-            if group != ngroup - 1:
-                fancyprint(f'  Final group is fully DQ-flagged; scoring group '
-                           f'{group} of {ngroup} instead.')
-            return group
-    fancyprint('  Every group is fully DQ-flagged; scoring the final group, '
-               'which will yield a non-finite cost.', msg_type='WARNING')
-    return -1
 
 
 def apply_dq_flags(datafiles):
@@ -74,7 +34,7 @@ def apply_dq_flags(datafiles):
         For 4D input, the group whose DQ was used for the mask and which the
         caller must therefore score (see last_scoreable_group). -1 for 3D.
     """
-    
+
     datafiles = np.atleast_1d(datafiles)
     group = None
 
@@ -90,7 +50,8 @@ def apply_dq_flags(datafiles):
             with utils.open_filetype(file) as datamodel:
                 data = datamodel.data
                 dq = datamodel.dq
-                fancyprint(f'  Loaded from datamodel: data.shape={data.shape}, dq.shape={dq.shape if dq is not None else None}')
+                fancyprint(
+                    f'  Loaded from datamodel: data.shape={data.shape}, dq.shape={dq.shape if dq is not None else None}')
 
         if dq is not None:
             # for 4D data (pre-rampfit), take last group
@@ -161,12 +122,14 @@ def apply_dq_flags(datafiles):
                     fancyprint(f'  bad_pixels.shape={bad_pixels.shape}')
 
             # Apply mask
-            fancyprint(f'  Applying mask: data.shape={data.shape}, bad_pixels.shape={bad_pixels.shape}')
+            fancyprint(
+                f'  Applying mask: data.shape={data.shape}, bad_pixels.shape={bad_pixels.shape}')
 
             data[bad_pixels] = np.nan
 
             n_bad = np.sum(bad_pixels)
-            fancyprint(f'Segment {i}: Flagged {n_bad}/{bad_pixels.size} pixels ({100*n_bad/bad_pixels.size:.2f}%)')
+            fancyprint(
+                f'Segment {i}: Flagged {n_bad}/{bad_pixels.size} pixels ({100 * n_bad / bad_pixels.size:.2f}%)')
         else:
             fancyprint(f'Segment {i}: No DQ found', msg_type='WARNING')
             is_4d = data.ndim == 4
@@ -583,3 +546,68 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
 
     else:
         raise ValueError(f"Unknown instrument: {instrument}")
+
+
+def last_scoreable_group(dq):
+    """Index of the last group that still has usable pixels.
+
+    Optimizer trials taken before RampFit are scored on a single group of the
+    ramp, with every DQ-flagged pixel NaN-ed out. Normally that is the final
+    group, but a group whose DQ is set for EVERY pixel leaves nothing to
+    extract: the aperture is entirely NaN and `cost_function` returns NaN for
+    both its terms, so the whole sweep collapses.
+
+    MIRI hits this on every exposure, because DQInitStep flags the first and
+    last MIRI group DO_NOT_USE (stage1.py, flag_first/last_miri_frame). Only
+    the stage-1 checkpoints score a 4D product, so for MIRI this silently
+    disabled the `time_jump_threshold` and `time_window` sweeps.
+
+    Walking back to the last group that is not fully flagged restores a
+    meaningful comparison and is a no-op for SOSS/NIRSpec, whose final group
+    is not flagged wholesale.
+
+    Parameters
+    dq : array
+        4D group DQ cube, (nint, ngroup, y, x).
+
+    Returns
+    group : int
+        Group index to mask and score. Falls back to -1 if every group is
+        fully flagged.
+    """
+
+    ngroup = dq.shape[1]
+    for group in range(ngroup - 1, -1, -1):
+        if not np.all(dq[:, group] > 0):
+            if group != ngroup - 1:
+                fancyprint(f'  Final group is fully DQ-flagged; scoring group '
+                           f'{group} of {ngroup} instead.')
+            return group
+    fancyprint('  Every group is fully DQ-flagged; scoring the final group, '
+               'which will yield a non-finite cost.', msg_type='WARNING')
+    return -1
+
+
+def stitch_soss_orders(wave_o1, wave_o2, flux_o1=None, flux_o2=None, cutoff=0.85):
+    """Stitch SOSS order 2 (<= cutoff) and order 1 (> cutoff) onto one wavelength axis.
+
+    Selection is by wavelength, not by edge index, since SOSS wavelengths decrease with detector
+    column before Stage 3 formatting. Returned arrays are sorted by wavelength.
+    """
+
+    wave_o1 = np.asarray(wave_o1, float)
+    wave_o2 = np.asarray(wave_o2, float)
+    i2 = np.where(wave_o2 <= cutoff)[0]
+    i1 = np.where(wave_o1 > cutoff)[0]
+    if i2.size == 0 or i1.size == 0:
+        raise ValueError("Cutoff produces empty segment: "
+                         f"O2<= {cutoff}: {i2.size}, O1> {cutoff}: {i1.size}")
+
+    wave = np.concatenate([wave_o2[i2], wave_o1[i1]])
+    s = np.argsort(wave, kind='mergesort')
+    wave = wave[s]
+    if flux_o1 is None or flux_o2 is None:
+        return wave, None
+    flux = np.concatenate([np.asarray(flux_o2, float)[:, i2],
+                           np.asarray(flux_o1, float)[:, i1]], axis=1)
+    return wave, flux[:, s]
