@@ -6,16 +6,39 @@
 Helper functions for the run_optimize.py script with handling of DQ flags and extraction.
 """
 
+import ast
 from astropy.io import fits
+import glob
 import matplotlib.pyplot as plt
 import numpy as np
 import os
 import pandas as pd
+import re
 from tqdm import tqdm
 
 from exotedrf.stage3 import get_wave_soss, trace_spectrum, _parse_extraction_width
 from exotedrf import utils
 from exotedrf.utils import fancyprint
+
+
+def append_cost_log_row(cost_path, param_cols, row_values, duration_s, cost):
+    """Append one optimizer result row to the cost log.
+    """
+
+    fields = [format_log_value(row_values.get(col, '')) for col in param_cols]
+    fields.extend([f"{duration_s:.1f}", f"{cost:.12f}"])
+    with open(cost_path, 'a') as logf:
+        logf.write('\t'.join(fields) + '\n')
+
+
+def append_scatter_log_row(name_str, scatter, outdir):
+    """Append one scatter spectrum row to the scatter log.
+    """
+
+    scatter_path = f"{outdir}/LightCurve_Scatter{name_str}.txt"
+    with open(scatter_path, 'a') as logs:
+        logs.write(' '.join(f"{x:.10g}" for x in scatter) + '\n')
+    return scatter_path
 
 
 def apply_dq_flags(datafiles):
@@ -142,6 +165,56 @@ def apply_dq_flags(datafiles):
 
     # 3D input (or 4D input with no DQ at all) keeps the historical -1.
     return cube, is_4d, (-1 if group is None else group)
+
+
+def delete_checkpoint_outputs(checkpoint_name, outdir_s1, outdir_s2):
+    """Delete a checkpoint step's cached outputs, and those of every step downstream of it, so
+    the next pipeline call recomputes them.
+    """
+
+    # Downstream Steps
+    _STAGE1_AFTER_1OVERF = ['linearitystep', 'jump', 'rampfitstep', 'gainscalestep']
+    _STAGE2_ALL = ['assignwcsstep', 'extract2dstep', 'sourcetypestep', 'wavecorrstep',
+                   'flatfieldstep', 'photomstep', 'backgroundstep', 'oneoverfstep', 'badpixstep',
+                   'pcareconstructstep']
+    _STAGE2_AFTER_BKG = ['oneoverfstep', 'badpixstep', 'pcareconstructstep']
+
+    patterns = []
+    downstream = []
+    if checkpoint_name == 'OneOverFStep_grp':
+        patterns.append(f"{outdir_s1}*_oneoverfstep.fits")
+        downstream += [f"{outdir_s1}*_{t}.fits" for t in _STAGE1_AFTER_1OVERF]
+        downstream += [f"{outdir_s2}*_{t}.fits" for t in _STAGE2_ALL]
+        downstream.append(f"{outdir_s2}*hot_pixels.npy")
+    elif checkpoint_name == 'JumpStep':
+        patterns.append(f"{outdir_s1}*_jump.fits")
+        downstream += [f"{outdir_s1}*_{t}.fits" for t in ['rampfitstep', 'gainscalestep']]
+        downstream += [f"{outdir_s2}*_{t}.fits" for t in _STAGE2_ALL]
+        downstream.append(f"{outdir_s2}*hot_pixels.npy")
+    elif checkpoint_name == 'BackgroundStep':
+        patterns.append(f"{outdir_s2}*_backgroundstep.fits")
+        downstream += [f"{outdir_s2}*_{t}.fits" for t in _STAGE2_AFTER_BKG]
+        downstream.append(f"{outdir_s2}*hot_pixels.npy")
+    elif checkpoint_name == 'BadPixStep':
+        patterns.append(f"{outdir_s2}*_badpixstep.fits")
+        # Also delete cached hot_pixels.npy to force spatial outlier
+        # redetection with new parameters (space_thresh, box_size).
+        patterns.append(f"{outdir_s2}*hot_pixels.npy")
+        downstream.append(f"{outdir_s2}*_pcareconstructstep.fits")
+    deleted = 0
+    for pattern in patterns + downstream:
+        files_to_delete = glob.glob(pattern)
+        if files_to_delete:
+            fancyprint(f"Deleting {len(files_to_delete)} cached file(s) for {checkpoint_name}:")
+        for cached_file in files_to_delete:
+            fancyprint(f"  Deleting: {cached_file}")
+            os.remove(cached_file)
+            if pattern in patterns:
+                deleted += 1
+    if patterns and deleted == 0:
+        fancyprint(f"WARNING: No cached files found matching: {patterns}", msg_type='WARNING')
+
+
 
 
 def do_box_extraction_nanaware(cube, ypos, width, extract_start=0, extract_end=None, progress=True):
@@ -548,6 +621,69 @@ def extract_at_step(datafile, instrument, extract_width, centroids, baseline_int
         raise ValueError(f"Unknown instrument: {instrument}")
 
 
+def find_best_logged_extract_width(name_str, outdir):
+    """Read the best logged extract width from the optimizer cost table.
+    """
+
+    cost_path = f"{outdir}/Cost_Summary{name_str}.txt"
+    if not os.path.exists(cost_path):
+        raise FileNotFoundError(f"No optimizer cost log found at {cost_path}")
+
+    df = pd.read_csv(cost_path, sep='\t', keep_default_na=False)
+    if 'extract_width' not in df.columns or 'cost' not in df.columns:
+        raise ValueError(f"{cost_path} does not contain extract_width and cost columns.")
+
+    cost = pd.to_numeric(df['cost'], errors='coerce')
+    valid = cost.notna() & (df['extract_width'].astype(str).str.strip() != '')
+    if not valid.any():
+        raise ValueError(f"{cost_path} does not contain any valid logged extract_width values.")
+
+    best_idx = cost[valid].idxmin()
+    width = parse_extract_width_metadata(df.loc[best_idx, 'extract_width'])
+    if width in [None, 'None', 'null', '']:
+        raise ValueError(f"Could not parse extract_width from best row of {cost_path}")
+    fancyprint(f"  Reusing best logged extract_width from {cost_path}: {width}")
+    return width
+
+
+def find_existing_stage2_outputs(patterns, error_message):
+    """Return the first matching set of Stage 2 files from a list of glob patterns.
+    """
+
+    for pattern in patterns:
+        found_files = sorted(glob.glob(pattern))
+        if found_files:
+            fancyprint(f"  Found {len(found_files)} file(s) matching: {pattern}")
+            return found_files
+    raise FileNotFoundError(error_message)
+
+
+def find_stage3_spectrum_file(extract_method, outdir):
+    """Return the first Stage 3 full-resolution spectrum file for the requested method.
+    """
+
+    pattern = os.path.join(outdir, f"*_{extract_method}_spectra_fullres.fits")
+    matches = sorted(glob.glob(pattern))
+    if not matches:
+        raise FileNotFoundError(f"No Stage 3 spectrum file found matching {pattern}")
+    return matches[0]
+
+
+def format_log_value(value):
+    """Format optimizer values for TSV logging.
+    """
+
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    if isinstance(value, (list, tuple)):
+        return '[' + ','.join(str(v) for v in value) + ']'
+    if value is None:
+        return 'None'
+    if pd.isna(value):
+        return ''
+    return str(value)
+
+
 def last_scoreable_group(dq):
     """Index of the last group that still has usable pixels.
 
@@ -588,6 +724,282 @@ def last_scoreable_group(dq):
     return -1
 
 
+def load_ad_hoc_centroids(cfg, outdir2, outdir3, stage2_source_dir=None):
+    """Load centroids from the config or existing pipeline outputs.
+    """
+
+    centroids_path = cfg['centroids']
+    if centroids_path is not None:
+        fancyprint(f"  Using centroids from config: {centroids_path}")
+        if isinstance(centroids_path, str):
+            return pd.read_csv(centroids_path, comment='#')
+        return centroids_path
+
+    s2_dir = stage2_source_dir if stage2_source_dir is not None else outdir2
+    centroid_patterns = [
+        (outdir3, 'Stage 3'),
+        (s2_dir, 'Stage 2'),
+    ]
+    for outdir, label in centroid_patterns:
+        centroid_files = sorted(glob.glob(f'{outdir}*centroids.csv'))
+        if centroid_files:
+            centroid_file = centroid_files[0]
+            fancyprint(f"  Loading centroids from {label}: {centroid_file}")
+            return pd.read_csv(centroid_file, comment='#')
+
+    fancyprint("No centroid table found in config, Stage 3, or Stage 2. Stage 3 will trace "
+               "centroids from the deepframe.")
+    return None
+
+
+def parse_extract_width_metadata(width_value):
+    """Parse an extraction width from YAML/header metadata into a scalar or asymmetric dict.
+    """
+
+    if width_value is None:
+        return None
+    if isinstance(width_value, dict):
+        return width_value
+    if isinstance(width_value, str):
+        text = width_value.strip()
+    elif np.isscalar(width_value):
+        return width_value
+    else:
+        text = None
+    if isinstance(width_value, (list, tuple)):
+        if len(width_value) == 2:
+            return {'lower': float(width_value[0]), 'upper': float(width_value[1])}
+        return list(width_value)
+    if text is None:
+        text = str(width_value).strip()
+    if text in ['', 'None', 'null']:
+        return None
+
+    if text.startswith('{') and text.endswith('}'):
+        try:
+            parsed = ast.literal_eval(text)
+        except (SyntaxError, ValueError):
+            parsed = None
+        if isinstance(parsed, dict):
+            return parsed
+    if text.startswith('[') and text.endswith(']'):
+        try:
+            parsed = ast.literal_eval(text)
+        except (SyntaxError, ValueError):
+            parsed = None
+        if isinstance(parsed, (list, tuple)):
+            if len(parsed) == 2:
+                return {'lower': float(parsed[0]), 'upper': float(parsed[1])}
+            return list(parsed)
+
+    match = re.fullmatch(
+        r'lower\s*=\s*([-+]?\d*\.?\d+)\s*,\s*upper\s*=\s*([-+]?\d*\.?\d+)', text
+    )
+    if match:
+        return {'lower': float(match.group(1)), 'upper': float(match.group(2))}
+
+    try:
+        scalar = float(text)
+    except ValueError:
+        return text
+
+    if scalar.is_integer():
+        return int(scalar)
+    return scalar
+
+
+def prepare_cost_log(name_str, required_param_cols, outdir):
+    """Ensure the cost log exists and can store the requested parameter columns.
+    """
+
+    cost_path = f"{outdir}/Cost_Summary{name_str}.txt"
+    if os.path.exists(cost_path) and os.path.getsize(cost_path) > 0:
+        df = pd.read_csv(cost_path, sep='\t', keep_default_na=False)
+    else:
+        df = pd.DataFrame()
+
+    existing_param_cols = [c for c in df.columns if c not in ['duration_s', 'cost']]
+    param_cols = existing_param_cols.copy()
+    for col in required_param_cols:
+        if col not in param_cols:
+            param_cols.append(col)
+
+    if df.empty:
+        df = pd.DataFrame(columns=param_cols + ['duration_s', 'cost'])
+    else:
+        for col in param_cols:
+            if col not in df.columns:
+                df[col] = ''
+        for col in ['duration_s', 'cost']:
+            if col not in df.columns:
+                df[col] = ''
+        df = df[param_cols + ['duration_s', 'cost']]
+
+    df.to_csv(cost_path, sep='\t', index=False)
+
+    best_logged = {}
+    if len(df) > 0:
+        numeric_cost = pd.to_numeric(df['cost'], errors='coerce')
+        if numeric_cost.notna().any():
+            best_logged = df.loc[numeric_cost.idxmin(), param_cols].to_dict()
+
+    return cost_path, param_cols, len(df), best_logged
+
+
+def resolve_ad_hoc_deepframe(cfg, outdir, stage2_source_dir=None):
+    """Resolve the deepframe path for ad hoc Stage 3 runs.
+    """
+
+    deepframe = cfg['deepframe']
+    if deepframe is not None:
+        return deepframe
+
+    s2_dir = stage2_source_dir if stage2_source_dir is not None else outdir
+    deepframe_files = sorted(glob.glob(f'{s2_dir}*deepframe.fits'))
+    if deepframe_files:
+        fancyprint(f"  Using deepframe from: {deepframe_files[0]}")
+        return deepframe_files[0]
+
+    return None
+
+
+def resolve_ad_hoc_extract_width(cfg, outdirf, outdir3):
+    """Resolve the extraction width to use for ad hoc Stage-3 reruns.
+    """
+
+    if cfg['optimize_extract_width']:
+        return cfg['extract_width']
+
+    width = cfg['extract_width']
+    if width is not None:
+        return width
+
+    if cfg['reuse_first_pass_extract_width']:
+        source_method = cfg['first_pass_extract_method']
+        try:
+            specfile = find_stage3_spectrum_file(source_method, outdir3)
+        except FileNotFoundError:
+            name_str = cfg['run_name']
+            if name_str != '':
+                name_str = '_' + name_str
+            fancyprint("  No first-pass Stage 3 spectrum file found; falling back to optimizer "
+                       "cost log for extract_width.")
+            return find_best_logged_extract_width(name_str, outdirf)
+        header = fits.getheader(specfile)
+        width = parse_extract_width_metadata(header.get('WIDTH'))
+        if width is None:
+            raise ValueError(f"WIDTH header missing or unreadable in {specfile}")
+        fancyprint(f"  Reusing first-pass extract_width from {specfile}: {width}")
+        return width
+
+    raise ValueError(
+        "No extract_width specified for the Stage-3 rerun. Set extract_width, or set "
+        "reuse_first_pass_extract_width=True to read it from an existing first-pass Stage 3 "
+        "box spectrum."
+    )
+
+
+def resolve_existing_centroids(cfg, outdir2, outdir3, fileroot_noseg=None):
+    """Resolve the centroid table for a Stage 3 extraction or rerun. If `fileroot_noseg` is
+    given, only centroid tables written for that dataset are considered.
+    """
+
+    centroids_path = cfg['centroids']
+    if centroids_path is not None:
+        fancyprint(f"  Using centroids from config: {centroids_path}")
+        if isinstance(centroids_path, str):
+            return pd.read_csv(centroids_path, comment='#')
+        return centroids_path
+
+    centroid_patterns = [
+        (outdir3, 'Stage 3'),
+        (outdir2, 'Stage 2'),
+    ]
+    for outdir, label in centroid_patterns:
+        if fileroot_noseg is not None:
+            centroid_files = sorted(glob.glob(f'{outdir}{glob.escape(fileroot_noseg)}centroids.csv'))
+        else:
+            centroid_files = sorted(glob.glob(f'{outdir}*centroids.csv'))
+        if centroid_files:
+            fancyprint(f"  Loading centroids from {label}: {centroid_files[0]}")
+            return pd.read_csv(centroid_files[0], comment='#')
+
+    raise FileNotFoundError(
+        "No centroid table available for Stage 3. Set 'centroids' in the config or provide "
+        "a Stage 3/Stage 2 centroids.csv output."
+    )
+
+
+def resolve_extract1d_kwargs(cfg):
+    """Return the Stage 3 Extract1dStep kwargs block, if present.
+    """
+
+    return cfg.get('stage3_kwargs', {}).get('Extract1dStep', {})
+
+
+def select_best_trial(costs, param_name='parameter'):
+    """Return the index of the first finite minimum cost.
+
+    np.argmin returns the index of a NaN if one is present, so a failed trial
+    could otherwise be selected as the winner. Non-finite costs are skipped;
+    ties keep the earliest candidate.
+    """
+
+    best_idx = None
+    best_cost = None
+    for idx, cost in enumerate(costs):
+        cost = float(cost)
+        if not np.isfinite(cost):
+            continue
+        if best_idx is None or cost < best_cost:
+            best_idx, best_cost = idx, cost
+    if best_idx is None:
+        raise ValueError(f'All candidate values for {param_name} produced non-finite costs.')
+
+    return best_idx
+
+
+def stage1_kwargs_with_winners(cfg):
+    """Stage 1 kwargs with the current scalar time_window forwarded to JumpStep.
+
+    time_window was previously only forwarded while it was itself being swept,
+    so later sweeps and the Phase 2 run silently fell back to the step default
+    instead of the current best (or fixed) value.
+    """
+
+    kwargs = cfg['stage1_kwargs']
+    time_window = cfg['time_window']
+    if 'JumpStep' in kwargs.keys():
+        step_kwargs = kwargs['JumpStep']
+    else:
+        step_kwargs = {}
+    if isinstance(time_window, (int, float, np.integer, np.floating)):
+        step_kwargs['time_window'] = time_window
+        kwargs['JumpStep'] = step_kwargs
+
+    return kwargs
+
+
+def stage2_kwargs_with_winners(cfg):
+    """Stage 2 kwargs with current scalar box_size/window_size forwarded to
+    BadPixStep (same defect and fix as stage1_kwargs_with_winners).
+    """
+
+    kwargs = cfg['stage2_kwargs']
+    if 'BadPixStep' in kwargs.keys():
+        step_kwargs = kwargs['BadPixStep']
+    else:
+        step_kwargs = {}
+    for key in ('box_size', 'window_size'):
+        value = cfg[key]
+        if isinstance(value, (int, float, np.integer, np.floating)):
+            step_kwargs[key] = value
+    if step_kwargs:
+        kwargs['BadPixStep'] = step_kwargs
+
+    return kwargs
+
+
 def stitch_soss_orders(wave_o1, wave_o2, flux_o1=None, flux_o2=None, cutoff=0.85):
     """Stitch SOSS order 2 (<= cutoff) and order 1 (> cutoff) onto one wavelength axis.
 
@@ -611,3 +1023,5 @@ def stitch_soss_orders(wave_o1, wave_o2, flux_o1=None, flux_o2=None, cutoff=0.85
     flux = np.concatenate([np.asarray(flux_o2, float)[:, i2],
                            np.asarray(flux_o1, float)[:, i1]], axis=1)
     return wave, flux[:, s]
+
+

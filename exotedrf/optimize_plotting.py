@@ -342,6 +342,7 @@ def plot_cost(name_str, outdir, table_height=0.4):
                 dpi=300, bbox_inches='tight')
 
 
+# TODO: Figure out why this isn't plotting order 2.
 def plot_scatter(txtfile, rows, wave_range=None, smooth=None, spectrum_files=None, style='line',
                  ylim=None, save_path=None, tol=0.05):
     """Plot point-to-point (P2P) scatter vs wavelength for selected rows from a scatter table.

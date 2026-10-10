@@ -8,14 +8,12 @@ Created on Fri Aug 15 00:00 2025
 Script to run the exoTEDRF pipeline optimizer.
 """
 
-import ast
-from astropy.io import fits
+
 from datetime import datetime
 import glob
 import numpy as np
 import os
 import pandas as pd
-import re
 import shutil
 import sys
 import time
@@ -51,13 +49,6 @@ stage1_steps = ['DQInitStep', 'INLCorrStep', 'EmiCorrStep', 'SuperBiasStep', 'Re
                 'GainScaleStep']
 stage2_steps = ['AssignWCSStep', 'FlatFieldStep', 'OneOverFStep_int', 'BackgroundStep',
                 'BadPixStep', 'PCAReconstructStep']
-
-# Downstream Steps
-_STAGE1_AFTER_1OVERF = ['linearitystep', 'jump', 'rampfitstep', 'gainscalestep']
-_STAGE2_ALL = ['assignwcsstep', 'extract2dstep', 'sourcetypestep', 'wavecorrstep',
-               'flatfieldstep', 'photomstep', 'backgroundstep', 'oneoverfstep', 'badpixstep',
-               'pcareconstructstep']
-_STAGE2_AFTER_BKG = ['oneoverfstep', 'badpixstep', 'pcareconstructstep']
 
 # Optimization Checkpoints
 all_checkpoints = [
@@ -131,7 +122,7 @@ utils.verify_path(outdir_s1)
 utils.verify_path(outdir_s2)
 utils.verify_path(outdir_s3)
 
-# ======== OBSERVING CONFIG PARAMETERS ========
+# Observing Configuration Parameters
 # Observation mode in lowercase (e.g., 'niriss', 'nirspec', 'miri')
 obs_mode = config['observing_mode'].lower()
 # Detector filter in lowercase (e.g., 'clear', 'nrs1', 'nrs2')
@@ -331,302 +322,6 @@ def cost_function(st3, baseline_ints=None, wave_range=None, w1=0.0, w2=1.0, tol=
     return cost, ptp2_spec_wave
 
 
-def format_log_value(value):
-    """Format optimizer values for TSV logging.
-    """
-
-    if isinstance(value, np.ndarray):
-        value = value.tolist()
-    if isinstance(value, (list, tuple)):
-        return '[' + ','.join(str(v) for v in value) + ']'
-    if value is None:
-        return 'None'
-    if pd.isna(value):
-        return ''
-    return str(value)
-
-
-def prepare_cost_log(name_str, required_param_cols):
-    """Ensure the cost log exists and can store the requested parameter columns.
-    """
-
-    cost_path = f"{outdir_f}/Cost_Summary{name_str}.txt"
-    if os.path.exists(cost_path) and os.path.getsize(cost_path) > 0:
-        df = pd.read_csv(cost_path, sep='\t', keep_default_na=False)
-    else:
-        df = pd.DataFrame()
-
-    existing_param_cols = [c for c in df.columns if c not in ['duration_s', 'cost']]
-    param_cols = existing_param_cols.copy()
-    for col in required_param_cols:
-        if col not in param_cols:
-            param_cols.append(col)
-
-    if df.empty:
-        df = pd.DataFrame(columns=param_cols + ['duration_s', 'cost'])
-    else:
-        for col in param_cols:
-            if col not in df.columns:
-                df[col] = ''
-        for col in ['duration_s', 'cost']:
-            if col not in df.columns:
-                df[col] = ''
-        df = df[param_cols + ['duration_s', 'cost']]
-
-    df.to_csv(cost_path, sep='\t', index=False)
-
-    best_logged = {}
-    if len(df) > 0:
-        numeric_cost = pd.to_numeric(df['cost'], errors='coerce')
-        if numeric_cost.notna().any():
-            best_logged = df.loc[numeric_cost.idxmin(), param_cols].to_dict()
-
-    return cost_path, param_cols, len(df), best_logged
-
-
-def append_cost_log_row(cost_path, param_cols, row_values, duration_s, cost):
-    """Append one optimizer result row to the cost log.
-    """
-
-    fields = [format_log_value(row_values.get(col, '')) for col in param_cols]
-    fields.extend([f"{duration_s:.1f}", f"{cost:.12f}"])
-    with open(cost_path, 'a') as logf:
-        logf.write('\t'.join(fields) + '\n')
-
-
-def append_scatter_log_row(name_str, scatter):
-    """Append one scatter spectrum row to the scatter log.
-    """
-
-    scatter_path = f"{outdir_f}/LightCurve_Scatter{name_str}.txt"
-    with open(scatter_path, 'a') as logs:
-        logs.write(' '.join(f"{x:.10g}" for x in scatter) + '\n')
-    return scatter_path
-
-
-def load_ad_hoc_centroids(cfg, stage2_source_dir=None):
-    """Load centroids from the config or existing pipeline outputs.
-    """
-
-    centroids_path = cfg['centroids']
-    if centroids_path is not None:
-        fancyprint(f"  Using centroids from config: {centroids_path}")
-        if isinstance(centroids_path, str):
-            return pd.read_csv(centroids_path, comment='#')
-        return centroids_path
-
-    s2_dir = stage2_source_dir if stage2_source_dir is not None else outdir_s2
-    centroid_patterns = [
-        (outdir_s3, 'Stage 3'),
-        (s2_dir, 'Stage 2'),
-    ]
-    for outdir, label in centroid_patterns:
-        centroid_files = sorted(glob.glob(f'{outdir}*centroids.csv'))
-        if centroid_files:
-            centroid_file = centroid_files[0]
-            fancyprint(f"  Loading centroids from {label}: {centroid_file}")
-            return pd.read_csv(centroid_file, comment='#')
-
-    fancyprint("No centroid table found in config, Stage 3, or Stage 2. Stage 3 will trace "
-               "centroids from the deepframe.")
-    return None
-
-
-def resolve_existing_centroids(cfg, fileroot_noseg=None):
-    """Resolve the centroid table for a Stage 3 extraction or rerun. If `fileroot_noseg` is
-    given, only centroid tables written for that dataset are considered.
-    """
-
-    centroids_path = cfg['centroids']
-    if centroids_path is not None:
-        fancyprint(f"  Using centroids from config: {centroids_path}")
-        if isinstance(centroids_path, str):
-            return pd.read_csv(centroids_path, comment='#')
-        return centroids_path
-
-    centroid_patterns = [
-        (outdir_s3, 'Stage 3'),
-        (outdir_s2, 'Stage 2'),
-    ]
-    for outdir, label in centroid_patterns:
-        if fileroot_noseg is not None:
-            centroid_files = sorted(glob.glob(f'{outdir}{glob.escape(fileroot_noseg)}centroids.csv'))
-        else:
-            centroid_files = sorted(glob.glob(f'{outdir}*centroids.csv'))
-        if centroid_files:
-            fancyprint(f"  Loading centroids from {label}: {centroid_files[0]}")
-            return pd.read_csv(centroid_files[0], comment='#')
-
-    raise FileNotFoundError(
-        "No centroid table available for Stage 3. Set 'centroids' in the config or provide "
-        "a Stage 3/Stage 2 centroids.csv output."
-    )
-
-
-def find_existing_stage2_outputs(patterns, error_message):
-    """Return the first matching set of Stage 2 files from a list of glob patterns.
-    """
-
-    for pattern in patterns:
-        found_files = sorted(glob.glob(pattern))
-        if found_files:
-            fancyprint(f"  Found {len(found_files)} file(s) matching: {pattern}")
-            return found_files
-    raise FileNotFoundError(error_message)
-
-
-def resolve_ad_hoc_deepframe(cfg, stage2_source_dir=None):
-    """Resolve the deepframe path for ad hoc Stage 3 runs.
-    """
-
-    deepframe = cfg['deepframe']
-    if deepframe is not None:
-        return deepframe
-
-    s2_dir = stage2_source_dir if stage2_source_dir is not None else outdir_s2
-    deepframe_files = sorted(glob.glob(f'{s2_dir}*deepframe.fits'))
-    if deepframe_files:
-        fancyprint(f"  Using deepframe from: {deepframe_files[0]}")
-        return deepframe_files[0]
-
-    return None
-
-
-def resolve_extract1d_kwargs(cfg):
-    """Return the Stage 3 Extract1dStep kwargs block, if present.
-    """
-
-    return cfg.get('stage3_kwargs', {}).get('Extract1dStep', {})
-
-
-def find_stage3_spectrum_file(extract_method):
-    """Return the first Stage 3 full-resolution spectrum file for the requested method.
-    """
-
-    pattern = os.path.join(outdir_s3, f"*_{extract_method}_spectra_fullres.fits")
-    matches = sorted(glob.glob(pattern))
-    if not matches:
-        raise FileNotFoundError(f"No Stage 3 spectrum file found matching {pattern}")
-    return matches[0]
-
-
-def parse_extract_width_metadata(width_value):
-    """Parse an extraction width from YAML/header metadata into a scalar or asymmetric dict.
-    """
-
-    if width_value is None:
-        return None
-    if isinstance(width_value, dict):
-        return width_value
-    if isinstance(width_value, str):
-        text = width_value.strip()
-    elif np.isscalar(width_value):
-        return width_value
-    else:
-        text = None
-    if isinstance(width_value, (list, tuple)):
-        if len(width_value) == 2:
-            return {'lower': float(width_value[0]), 'upper': float(width_value[1])}
-        return list(width_value)
-    if text is None:
-        text = str(width_value).strip()
-    if text in ['', 'None', 'null']:
-        return None
-
-    if text.startswith('{') and text.endswith('}'):
-        try:
-            parsed = ast.literal_eval(text)
-        except (SyntaxError, ValueError):
-            parsed = None
-        if isinstance(parsed, dict):
-            return parsed
-    if text.startswith('[') and text.endswith(']'):
-        try:
-            parsed = ast.literal_eval(text)
-        except (SyntaxError, ValueError):
-            parsed = None
-        if isinstance(parsed, (list, tuple)):
-            if len(parsed) == 2:
-                return {'lower': float(parsed[0]), 'upper': float(parsed[1])}
-            return list(parsed)
-
-    match = re.fullmatch(
-        r'lower\s*=\s*([-+]?\d*\.?\d+)\s*,\s*upper\s*=\s*([-+]?\d*\.?\d+)', text
-    )
-    if match:
-        return {'lower': float(match.group(1)), 'upper': float(match.group(2))}
-
-    try:
-        scalar = float(text)
-    except ValueError:
-        return text
-
-    if scalar.is_integer():
-        return int(scalar)
-    return scalar
-
-
-def find_best_logged_extract_width(name_str):
-    """Read the best logged extract width from the optimizer cost table.
-    """
-
-    cost_path = f"{outdir_f}/Cost_Summary{name_str}.txt"
-    if not os.path.exists(cost_path):
-        raise FileNotFoundError(f"No optimizer cost log found at {cost_path}")
-
-    df = pd.read_csv(cost_path, sep='\t', keep_default_na=False)
-    if 'extract_width' not in df.columns or 'cost' not in df.columns:
-        raise ValueError(f"{cost_path} does not contain extract_width and cost columns.")
-
-    cost = pd.to_numeric(df['cost'], errors='coerce')
-    valid = cost.notna() & (df['extract_width'].astype(str).str.strip() != '')
-    if not valid.any():
-        raise ValueError(f"{cost_path} does not contain any valid logged extract_width values.")
-
-    best_idx = cost[valid].idxmin()
-    width = parse_extract_width_metadata(df.loc[best_idx, 'extract_width'])
-    if width in [None, 'None', 'null', '']:
-        raise ValueError(f"Could not parse extract_width from best row of {cost_path}")
-    fancyprint(f"  Reusing best logged extract_width from {cost_path}: {width}")
-    return width
-
-
-def resolve_ad_hoc_extract_width(cfg):
-    """Resolve the extraction width to use for ad hoc Stage-3 reruns.
-    """
-
-    if cfg['optimize_extract_width']:
-        return cfg['extract_width']
-
-    width = cfg['extract_width']
-    if width is not None:
-        return width
-
-    if cfg['reuse_first_pass_extract_width']:
-        source_method = cfg['first_pass_extract_method']
-        try:
-            specfile = find_stage3_spectrum_file(source_method)
-        except FileNotFoundError:
-            name_str = cfg['run_name']
-            if name_str != '':
-                name_str = '_' + name_str
-            fancyprint("  No first-pass Stage 3 spectrum file found; falling back to optimizer "
-                       "cost log for extract_width.")
-            return find_best_logged_extract_width(name_str)
-        header = fits.getheader(specfile)
-        width = parse_extract_width_metadata(header.get('WIDTH'))
-        if width is None:
-            raise ValueError(f"WIDTH header missing or unreadable in {specfile}")
-        fancyprint(f"  Reusing first-pass extract_width from {specfile}: {width}")
-        return width
-
-    raise ValueError(
-        "No extract_width specified for the Stage-3 rerun. Set extract_width, or set "
-        "reuse_first_pass_extract_width=True to read it from an existing first-pass Stage 3 "
-        "box spectrum."
-    )
-
-
 def run_stage3_for_width(stage2_inputs, cfg, centroids, deepframe, extract_width):
     """Run Stage 3 once for a specific extraction width.
     """
@@ -652,109 +347,6 @@ def run_stage3_for_width(stage2_inputs, cfg, centroids, deepframe, extract_width
     )
 
 
-def select_best_trial(costs, param_name='parameter'):
-    """Return the index of the first finite minimum cost.
-
-    np.argmin returns the index of a NaN if one is present, so a failed trial
-    could otherwise be selected as the winner. Non-finite costs are skipped;
-    ties keep the earliest candidate.
-    """
-
-    best_idx = None
-    best_cost = None
-    for idx, cost in enumerate(costs):
-        cost = float(cost)
-        if not np.isfinite(cost):
-            continue
-        if best_idx is None or cost < best_cost:
-            best_idx, best_cost = idx, cost
-    if best_idx is None:
-        raise ValueError(f'All candidate values for {param_name} produced non-finite costs.')
-    return best_idx
-
-
-def delete_checkpoint_outputs(checkpoint_name, outdir_s1, outdir_s2):
-    """Delete a checkpoint step's cached outputs, and those of every step downstream of it, so
-    the next pipeline call recomputes them.
-    """
-
-    patterns = []
-    downstream = []
-    if checkpoint_name == 'OneOverFStep_grp':
-        patterns.append(f"{outdir_s1}*_oneoverfstep.fits")
-        downstream += [f"{outdir_s1}*_{t}.fits" for t in _STAGE1_AFTER_1OVERF]
-        downstream += [f"{outdir_s2}*_{t}.fits" for t in _STAGE2_ALL]
-        downstream.append(f"{outdir_s2}*hot_pixels.npy")
-    elif checkpoint_name == 'JumpStep':
-        patterns.append(f"{outdir_s1}*_jump.fits")
-        downstream += [f"{outdir_s1}*_{t}.fits" for t in ['rampfitstep', 'gainscalestep']]
-        downstream += [f"{outdir_s2}*_{t}.fits" for t in _STAGE2_ALL]
-        downstream.append(f"{outdir_s2}*hot_pixels.npy")
-    elif checkpoint_name == 'BackgroundStep':
-        patterns.append(f"{outdir_s2}*_backgroundstep.fits")
-        downstream += [f"{outdir_s2}*_{t}.fits" for t in _STAGE2_AFTER_BKG]
-        downstream.append(f"{outdir_s2}*hot_pixels.npy")
-    elif checkpoint_name == 'BadPixStep':
-        patterns.append(f"{outdir_s2}*_badpixstep.fits")
-        # Also delete cached hot_pixels.npy to force spatial outlier
-        # redetection with new parameters (space_thresh, box_size).
-        patterns.append(f"{outdir_s2}*hot_pixels.npy")
-        downstream.append(f"{outdir_s2}*_pcareconstructstep.fits")
-    deleted = 0
-    for pattern in patterns + downstream:
-        files_to_delete = glob.glob(pattern)
-        if files_to_delete:
-            fancyprint(f"Deleting {len(files_to_delete)} cached file(s) for {checkpoint_name}:")
-        for cached_file in files_to_delete:
-            fancyprint(f"  Deleting: {cached_file}")
-            os.remove(cached_file)
-            if pattern in patterns:
-                deleted += 1
-    if patterns and deleted == 0:
-        fancyprint(f"WARNING: No cached files found matching: {patterns}", msg_type='WARNING')
-
-
-def stage1_kwargs_with_winners(cfg):
-    """Stage 1 kwargs with the current scalar time_window forwarded to JumpStep.
-
-    time_window was previously only forwarded while it was itself being swept,
-    so later sweeps and the Phase 2 run silently fell back to the step default
-    instead of the current best (or fixed) value.
-    """
-
-    kwargs = cfg['stage1_kwargs']
-    time_window = cfg['time_window']
-    if 'JumpStep' in kwargs.keys():
-        step_kwargs = kwargs['JumpStep']
-    else:
-        step_kwargs = {}
-    if isinstance(time_window, (int, float, np.integer, np.floating)):
-        step_kwargs['time_window'] = time_window
-        kwargs['JumpStep'] = step_kwargs
-
-    return kwargs
-
-
-def stage2_kwargs_with_winners(cfg):
-    """Stage 2 kwargs with current scalar box_size/window_size forwarded to
-    BadPixStep (same defect and fix as stage1_kwargs_with_winners).
-    """
-
-    kwargs = cfg['stage2_kwargs']
-    if 'BadPixStep' in kwargs.keys():
-        step_kwargs = kwargs['BadPixStep']
-    else:
-        step_kwargs = {}
-    for key in ('box_size', 'window_size'):
-        value = cfg[key]
-        if isinstance(value, (int, float, np.integer, np.floating)):
-            step_kwargs[key] = value
-    if step_kwargs:
-        kwargs['BadPixStep'] = step_kwargs
-
-    return kwargs
-
-
 def run_ad_hoc_extract_width_search(stage2_inputs, cfg, centroids, deepframe, baseline_ints,
                                     wave_range, w1, w2, name_str, base_row_values):
     """Append an ad hoc Stage 3 extraction sweep to the optimizer logs.
@@ -774,7 +366,9 @@ def run_ad_hoc_extract_width_search(stage2_inputs, cfg, centroids, deepframe, ba
     required_cols = ['ad_hoc_mode', 'remove_components']
     if 'extract_width' not in required_cols:
         required_cols.append('extract_width')
-    cost_path, param_cols, row_offset, best_logged = prepare_cost_log(name_str, required_cols)
+    cost_path, param_cols, row_offset, best_logged = opt_utils.prepare_cost_log(name_str,
+                                                                                required_cols,
+                                                                                outdir_f)
     if best_logged:
         merged_row_values = best_logged.copy()
         merged_row_values.update(base_row_values)
@@ -792,28 +386,23 @@ def run_ad_hoc_extract_width_search(stage2_inputs, cfg, centroids, deepframe, ba
         t0 = time.perf_counter()
 
         stage3_results = run_stage3_for_width(stage2_inputs, cfg, centroids, deepframe, width)
-        cost, scatter = cost_function(
-            stage3_results,
-            baseline_ints=baseline_ints,
-            wave_range=wave_range,
-            w1=w1,
-            w2=w2
-        )
+        cost, scatter = cost_function(stage3_results, baseline_ints=baseline_ints,
+                                      wave_range=wave_range, w1=w1, w2=w2)
 
         dt = time.perf_counter() - t0
         extract_costs.append(cost)
         appended_rows.append(row_offset + idx)
         this_row = merged_row_values.copy()
         this_row['extract_width'] = width
-        append_cost_log_row(cost_path, param_cols, this_row, dt, cost)
-        append_scatter_log_row(name_str, scatter)
+        opt_utils.append_cost_log_row(cost_path, param_cols, this_row, dt, cost)
+        opt_utils.append_scatter_log_row(name_str, scatter, outdir_f)
 
         fancyprint(f"extract_width={width}: cost={cost:.12f} ({dt:.1f}s)")
 
         if best_stage3_results is None or cost <= np.nanmin(extract_costs):
             best_stage3_results = stage3_results
 
-    best_idx = select_best_trial(extract_costs, 'extract_width')
+    best_idx = opt_utils.select_best_trial(extract_costs, 'extract_width')
     best_extract_width = extract_widths[best_idx]
     best_cost = extract_costs[best_idx]
     best_row_idx = appended_rows[best_idx]
@@ -931,14 +520,16 @@ def run_optimizer(cfg):
                 f'{stage2_source_dir}*_pcareconstructstep.fits',
                 f'{stage2_source_dir}*_badpixstep.fits',
             ]
-        stage2_files = find_existing_stage2_outputs(
+        stage2_files = opt_utils.find_existing_stage2_outputs(
             patterns,
             f"No Stage 2 outputs found in {stage2_source_dir}. "
             "Please run the full pipeline first before using optimize_extract_width_only mode."
         )
         fancyprint("Looking for centroids file...")
-        centroids_df = load_ad_hoc_centroids(cfg, stage2_source_dir=stage2_source_dir)
-        deepframe = resolve_ad_hoc_deepframe(cfg, stage2_source_dir=stage2_source_dir)
+        centroids_df = opt_utils.load_ad_hoc_centroids(cfg, outdir_s2, outdir_s3,
+                                                       stage2_source_dir=stage2_source_dir)
+        deepframe = opt_utils.resolve_ad_hoc_deepframe(cfg, outdir_s2,
+                                                       stage2_source_dir=stage2_source_dir)
 
         fancyprint(f"Using Stage 2 outputs: {stage2_files}")
         base_row_values = {
@@ -946,7 +537,8 @@ def run_optimizer(cfg):
             'remove_components': cfg.get('remove_components'),
         }
         rerun_cfg = cfg.copy()
-        rerun_cfg['extract_width'] = resolve_ad_hoc_extract_width(cfg)
+        rerun_cfg['extract_width'] = opt_utils.resolve_ad_hoc_extract_width(cfg, outdir_f,
+                                                                            outdir_s3)
         stage3_results, best_extract_width, _, best_row_idx = run_ad_hoc_extract_width_search(
             stage2_files, rerun_cfg, centroids_df, deepframe, baseline_ints, wave_range, w1, w2,
             name_str, base_row_values
@@ -958,7 +550,7 @@ def run_optimizer(cfg):
                              filter=filter, outdir=outdir_f)
 
         outfile = os.path.join(outdir_f, f"LightCurve_Scatter{name_str}.txt")
-        specfile = find_stage3_spectrum_file(extract_method)
+        specfile = opt_utils.find_stage3_spectrum_file(extract_method, outdir_s3)
         plot_scatter(txtfile=outfile, rows=[best_row_idx], wave_range=wave_range_plot, smooth=10,
                      spectrum_files=[specfile], ylim=None, style="line",
                      save_path=os.path.join(outdir_f, f"Scatter_Plot{name_str}.png"))
@@ -990,13 +582,13 @@ def run_optimizer(cfg):
             raise ValueError("remove_components must be set when from_pca_only=True")
 
         fancyprint("Looking for existing BadPix Step outputs...")
-        badpix_files = find_existing_stage2_outputs(
+        badpix_files = opt_utils.find_existing_stage2_outputs(
             [f'{outdir_s2}*_badpixstep.fits'],
             f"No BadPix Step outputs found in {outdir_s2}. "
             "Please run the optimizer through BadPixStep before using from_pca_only mode."
         )
         fancyprint("Looking for centroids file...")
-        centroids_df = load_ad_hoc_centroids(cfg)
+        centroids_df = opt_utils.load_ad_hoc_centroids(cfg, outdir_s2, outdir_s3)
 
         pca_skip_steps = ['AssignWCSStep', 'FlatFieldStep', 'BackgroundStep', 'OneOverFStep',
                           'BadPixStep']
@@ -1039,7 +631,8 @@ def run_optimizer(cfg):
             'remove_components': remove_components,
         }
         rerun_cfg = cfg.copy()
-        rerun_cfg['extract_width'] = resolve_ad_hoc_extract_width(cfg)
+        rerun_cfg['extract_width'] = opt_utils.resolve_ad_hoc_extract_width(cfg, outdir_f,
+                                                                            outdir_s3)
         stage3_results, best_extract_width, _, best_row_idx = run_ad_hoc_extract_width_search(
             stage2_results, rerun_cfg, centroids_df, deepframe, baseline_ints, wave_range, w1, w2,
             name_str, base_row_values
@@ -1051,7 +644,7 @@ def run_optimizer(cfg):
                              filter=filter, outdir=outdir_f)
 
         outfile = os.path.join(outdir_f, f"LightCurve_Scatter{name_str}.txt")
-        specfile = find_stage3_spectrum_file(extract_method)
+        specfile = opt_utils.find_stage3_spectrum_file(extract_method, outdir_s3)
         plot_scatter(txtfile=outfile, rows=[best_row_idx], wave_range=wave_range_plot, smooth=10,
                      spectrum_files=[specfile], ylim=None, style="line",
                      save_path=os.path.join(outdir_f, f"Scatter_Plot{name_str}.png"))
@@ -1065,7 +658,7 @@ def run_optimizer(cfg):
         fancyprint(f"\n{'='*60}")
         fancyprint(f"TOTAL RUNTIME: {h}h {m:02d}min {s:02d}s")
         fancyprint(f"{width_label}: {best_extract_width}")
-        fancyprint(f"REMOVE_COMPONENTS: {format_log_value(remove_components)}")
+        fancyprint(f"REMOVE_COMPONENTS: {opt_utils.format_log_value(remove_components)}")
         fancyprint(f"{'='*60}\n")
 
         return
@@ -1196,7 +789,7 @@ def run_optimizer(cfg):
                 fancyprint(f"\nTesting {param_name}={param_value}")
 
                 # Delete cached output for the optimization step to force rerun from that step
-                delete_checkpoint_outputs(checkpoint['name'], outdir_s1, outdir_s2)
+                opt_utils.delete_checkpoint_outputs(checkpoint['name'], outdir_s1, outdir_s2)
 
                 # run pipeline up to (including this step)
                 if checkpoint['stage'] == 1:
@@ -1213,7 +806,7 @@ def run_optimizer(cfg):
 
                     # Forward the current time_window (candidate while sweeping it,
                     # winner/fixed value otherwise) to JumpStep.
-                    s1_kwargs = stage1_kwargs_with_winners(run_cfg)
+                    s1_kwargs = opt_utils.stage1_kwargs_with_winners(run_cfg)
 
                     # Run Stage1 with force_redo=False (deleted file triggers rerun from that step).
                     stage1_results = run_stage1(
@@ -1293,7 +886,7 @@ def run_optimizer(cfg):
                         f277w=run_cfg.get('f277w'),
                         inl_amplitude_file=run_cfg.get('inl_amplitude_file'),
                         inl_periods=run_cfg.get('inl_periods'),
-                        **stage1_kwargs_with_winners(run_cfg)
+                        **opt_utils.stage1_kwargs_with_winners(run_cfg)
                     )
 
                     # Build skip list for Stage 2
@@ -1309,7 +902,7 @@ def run_optimizer(cfg):
 
                     # Forward the current box_size/window_size (candidate while
                     # sweeping them, winner/fixed values otherwise) to BadPixStep.
-                    s2_kwargs = stage2_kwargs_with_winners(run_cfg)
+                    s2_kwargs = opt_utils.stage2_kwargs_with_winners(run_cfg)
 
                     # Run Stage 2 with force_redo=False
                     # The deleted cached file will trigger rerun from that step onward
@@ -1387,7 +980,7 @@ def run_optimizer(cfg):
                         f277w=run_cfg.get('f277w'),
                         inl_amplitude_file=run_cfg.get('inl_amplitude_file'),
                         inl_periods=run_cfg.get('inl_periods'),
-                        **stage1_kwargs_with_winners(run_cfg)
+                        **opt_utils.stage1_kwargs_with_winners(run_cfg)
                     )
 
                     # Build skip list for Stage 2 based on user config
@@ -1427,7 +1020,7 @@ def run_optimizer(cfg):
                         miri_background_width=run_cfg.get('miri_background_width'),
                         miri_background_method=run_cfg.get('miri_background_method'),
                         root_dir=root_dir,
-                        **stage2_kwargs_with_winners(run_cfg)
+                        **opt_utils.stage2_kwargs_with_winners(run_cfg)
                     )
 
                     datafile = stage2_results[0]
@@ -1449,7 +1042,7 @@ def run_optimizer(cfg):
                     output_dir=outdir_s2,
                     extract_method=cfg.get('extract_method', 'box'),
                     extract_width_soss2=cfg.get('extract_width_soss2'),
-                    extract_step_kwargs=resolve_extract1d_kwargs(cfg)
+                    extract_step_kwargs=opt_utils.resolve_extract1d_kwargs(cfg)
                 )
 
                 # The fast NIRSpec/MIRI optimizer-side extraction uses pixel indices as
@@ -1459,13 +1052,8 @@ def run_optimizer(cfg):
                 else:
                     phase1_wave_range = None
 
-                cost, scatter = cost_function(
-                    spectral_dict,
-                    baseline_ints=baseline_ints,
-                    wave_range=phase1_wave_range,
-                    w1=w1,
-                    w2=w2
-                )
+                cost, scatter = cost_function(spectral_dict, baseline_ints=baseline_ints,
+                                              wave_range=phase1_wave_range, w1=w1, w2=w2)
 
                 # Debug cost details
                 fancyprint(f"  Cost function: w1={w1}, w2={w2}, wave_range={phase1_wave_range}")
@@ -1488,7 +1076,7 @@ def run_optimizer(cfg):
                 logs.flush()
 
             # Find best value for this parameter (non-finite costs cannot win)
-            best_idx = select_best_trial(costs, param_name)
+            best_idx = opt_utils.select_best_trial(costs, param_name)
             best_value = param_values[best_idx]
             best_cost = costs[best_idx]
 
@@ -1500,7 +1088,7 @@ def run_optimizer(cfg):
             # (the following sweep, or Phase 2) regenerates this checkpoint --
             # and, lazily, its downstream caches -- with the winning value.
             if best_idx != len(param_values) - 1:
-                delete_checkpoint_outputs(checkpoint['name'], outdir_s1, outdir_s2)
+                opt_utils.delete_checkpoint_outputs(checkpoint['name'], outdir_s1, outdir_s2)
 
     logf.close()
     logs.close()
@@ -1565,7 +1153,7 @@ def run_optimizer(cfg):
         f277w=final_cfg.get('f277w'),
         inl_amplitude_file=final_cfg.get('inl_amplitude_file'),
         inl_periods=final_cfg.get('inl_periods'),
-        **stage1_kwargs_with_winners(final_cfg)
+        **opt_utils.stage1_kwargs_with_winners(final_cfg)
     )
 
     # Build skip list for Stage 2
@@ -1608,7 +1196,7 @@ def run_optimizer(cfg):
         miri_background_width=final_cfg.get('miri_background_width'),
         miri_background_method=final_cfg.get('miri_background_method'),
         root_dir=root_dir,
-        **stage2_kwargs_with_winners(final_cfg)
+        **opt_utils.stage2_kwargs_with_winners(final_cfg)
     )
 
     # new_stage2.run_stage2 now returns (results, deepframe), not centroids.
@@ -1618,7 +1206,8 @@ def run_optimizer(cfg):
     # detector's when NRS1 and NRS2 share an output directory).
     final_fileroot = utils.get_filename_root_noseg(utils.get_filename_root(stage2_results))
     try:
-        this_centroid = resolve_existing_centroids(final_cfg, fileroot_noseg=final_fileroot)
+        this_centroid = opt_utils.resolve_existing_centroids(final_cfg, outdir_s2, outdir_s3,
+                                                             fileroot_noseg=final_fileroot)
     except FileNotFoundError:
         fancyprint("No Stage 3 or Stage 2 centroid table found. Stage 3 will trace centroids "
                    "from the deepframe.")
@@ -1674,13 +1263,8 @@ def run_optimizer(cfg):
             )
 
             # Compute cost using same function as Phase 1
-            cost, scatter = cost_function(
-                stage3_results,
-                baseline_ints=baseline_ints,
-                wave_range=wave_range,
-                w1=w1,
-                w2=w2
-            )
+            cost, scatter = cost_function(stage3_results, baseline_ints=baseline_ints,
+                                          wave_range=wave_range, w1=w1, w2=w2)
 
             dt = time.perf_counter() - t0
             extract_costs.append(cost)
@@ -1700,7 +1284,7 @@ def run_optimizer(cfg):
             logs.flush()
 
         # Select best extract_width (non-finite costs cannot win)
-        best_width_idx = select_best_trial(extract_costs, 'extract_width')
+        best_width_idx = opt_utils.select_best_trial(extract_costs, 'extract_width')
         best_extract_width = extract_widths[best_width_idx]
         best_extract_cost = extract_costs[best_width_idx]
 
@@ -1780,7 +1364,7 @@ def run_optimizer(cfg):
     outfile = os.path.join(outdir_f, f"LightCurve_Scatter_Final{name_str}.txt")
     with open(outfile, "w") as f:
         f.write(" ".join(f"{x:.10g}" for x in final_scatter) + "\n")
-    specfile = find_stage3_spectrum_file(final_cfg['extract_method'])
+    specfile = opt_utils.find_stage3_spectrum_file(final_cfg['extract_method'], outdir_s3)
 
     plot_scatter(txtfile=outfile, rows=[0], wave_range=wave_range_plot, smooth=10,
                  spectrum_files=[specfile], ylim=None, style="line",
